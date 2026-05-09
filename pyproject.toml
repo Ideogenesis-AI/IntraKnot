@@ -12,7 +12,7 @@ only-include = [
 [project]
 name = "intraknot"
 version = "0.1.0"
-description = "Intraknot: HPC management for tensor network and AI studies of quantum lattice models"
+description = "IntraKnot: HPC management for tensor network and AI studies of quantum lattice models"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
