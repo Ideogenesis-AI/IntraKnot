@@ -242,7 +242,7 @@ iknot status --id heis_L64_chi128_g1.0
 ## Installation
 
 ```bash
-uv sync --seed
+uv venv --seed && uv sync
 ```
 
 ## Development
