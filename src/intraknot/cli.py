@@ -1,0 +1,485 @@
+# Copyright (C) 2026 Changkai Zhang.
+#
+# This file is part of IntraKnot.
+#
+# IntraKnot is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published
+# by the Free Software Foundation, either version 3 of the License,
+# or (at your option) any later version.
+#
+# IntraKnot is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with IntraKnot. If not, see <https://www.gnu.org/licenses/>.
+
+
+"""IntraKnot command-line interface.
+
+Entry point: `iknot` (configured in `[project.scripts]`).
+
+Campaign session
+----------------
+The active campaign is resolved in this order:
+
+1. `INTRAKNOT_CAMPAIGN` environment variable.
+2. `active_campaign` key in `.iknot_state` (TOML file at the project root).
+3. `None` — no active campaign.
+
+`iknot campaign activate <id>` writes to `.iknot_state` and prints the
+corresponding `export` command so users can optionally source it in their
+shell.  `iknot campaign deactivate` clears both.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+from typing import Optional
+
+import click
+
+from .collect import collect_campaign, collect_run
+from .config import (
+    MachineConfig,
+    load_machine_config,
+    write_data_gitignore,
+    write_machines_yaml,
+    write_paths_toml,
+    write_slurm_toml,
+)
+from .launch import (
+    create_attempt,
+    create_campaign,
+    create_run,
+    submit_job,
+    write_slurm_script,
+)
+from .resume import find_resumable_runs, is_resumable, resume_campaign, resume_run
+from .status import read_status, MainStatus
+
+
+# ---------------------------------------------------------------------------
+# State file helpers
+# ---------------------------------------------------------------------------
+
+_STATE_FILE = ".iknot_state"
+
+
+def _state_file_path() -> Path:
+    return Path.cwd() / _STATE_FILE
+
+
+def _read_state() -> dict:
+    p = _state_file_path()
+    if not p.exists():
+        return {}
+    try:
+        with open(p, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
+
+
+def _write_state(data: dict) -> None:
+    p = _state_file_path()
+    lines = [f'{k} = "{v}"\n' for k, v in data.items()]
+    p.write_text("".join(lines))
+
+
+def _resolve_active_campaign() -> tuple[Optional[str], str]:
+    """Return `(campaign_id, source)` for the currently active campaign.
+
+    Returns `(None, "none")` when no campaign is active.
+    """
+    env_val = os.environ.get("INTRAKNOT_CAMPAIGN")
+    if env_val:
+        return env_val, "env:INTRAKNOT_CAMPAIGN"
+    state = _read_state()
+    if "active_campaign" in state:
+        return state["active_campaign"], f"file:{_STATE_FILE}"
+    return None, "none"
+
+
+# ---------------------------------------------------------------------------
+# Machine config helper
+# ---------------------------------------------------------------------------
+
+def _load_machine(machine_opt: Optional[str]) -> MachineConfig:
+    configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
+    return load_machine_config(configs_dir)
+
+
+# ---------------------------------------------------------------------------
+# Root group
+# ---------------------------------------------------------------------------
+
+@click.group()
+@click.version_option(package_name="intraknot")
+def main() -> None:
+    """IntraKnot — HPC management for tensor-network simulations."""
+
+
+# ---------------------------------------------------------------------------
+# iknot init
+# ---------------------------------------------------------------------------
+
+@main.command("init")
+@click.option("--campaigns-root", default="campaigns", show_default=True,
+              help="Path for the campaigns directory.")
+@click.option("--runs-root", default="runs", show_default=True,
+              help="Path for the runs directory.")
+@click.option("--notebooks-root", default="notebooks", show_default=True,
+              help="Path for the notebooks directory.")
+def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
+    """Initialise the IntraKnot project skeleton.
+
+    Creates configs/, campaigns/, runs/, and notebooks/ with .gitignore
+    files that exclude all contents from git.  Writes template
+    configs/slurm.toml, configs/paths.toml, and configs/machines.yaml.
+    Appends .iknot_state to the root .gitignore.
+    """
+    cwd = Path.cwd()
+
+    # configs/
+    configs_dir = cwd / "configs"
+    write_data_gitignore(configs_dir)
+    slurm_path = configs_dir / "slurm.toml"
+    paths_path = configs_dir / "paths.toml"
+    machines_path = configs_dir / "machines.yaml"
+    if not slurm_path.exists():
+        write_slurm_toml(slurm_path)
+        click.echo(f"  created {slurm_path.relative_to(cwd)}")
+    if not paths_path.exists():
+        write_paths_toml(paths_path)
+        click.echo(f"  created {paths_path.relative_to(cwd)}")
+    if not machines_path.exists():
+        write_machines_yaml(machines_path)
+        click.echo(f"  created {machines_path.relative_to(cwd)}")
+
+    # Data directories.
+    for rel in (campaigns_root, runs_root, notebooks_root):
+        d = cwd / rel
+        write_data_gitignore(d)
+        click.echo(f"  created {rel}/ with .gitignore")
+
+    # Root .gitignore — append .iknot_state if not already present.
+    root_gitignore = cwd / ".gitignore"
+    entry = ".iknot_state\n"
+    if root_gitignore.exists():
+        existing = root_gitignore.read_text()
+        if ".iknot_state" not in existing:
+            root_gitignore.write_text(existing.rstrip("\n") + "\n" + entry)
+    else:
+        root_gitignore.write_text(entry)
+    click.echo("  updated .gitignore")
+
+    click.echo("\nDone.  Edit configs/slurm.toml and configs/paths.toml before submitting jobs.")
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign
+# ---------------------------------------------------------------------------
+
+@main.group("campaign")
+def grp_campaign() -> None:
+    """Create and manage campaigns."""
+
+
+@grp_campaign.command("create")
+@click.option("--id", "campaign_id", required=True, help="Campaign identifier.")
+@click.option("--description", default="", help="Human-readable description.")
+@click.option("--algorithm", default="dmrg", show_default=True,
+              help="Algorithm runner to copy into the campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True,
+              help="Parent directory for campaign subdirectories.")
+def campaign_create(
+    campaign_id: str,
+    description: str,
+    algorithm: str,
+    campaigns_root: str,
+) -> None:
+    """Create a new campaign directory."""
+    root = Path(campaigns_root)
+    try:
+        campaign_dir = create_campaign(campaign_id, description, algorithm, root)
+        click.echo(f"Created campaign: {campaign_dir}")
+    except FileExistsError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@grp_campaign.command("activate")
+@click.argument("campaign_id")
+def campaign_activate(campaign_id: str) -> None:
+    """Set CAMPAIGN_ID as the active campaign.
+
+    Writes to .iknot_state and prints the export command for optional
+    shell-level sourcing.
+    """
+    state = _read_state()
+    state["active_campaign"] = campaign_id
+    _write_state(state)
+    click.echo(f"Active campaign set to: {campaign_id}")
+    click.echo(f"\nTo also set the environment variable in this shell, run:")
+    click.echo(f"  export INTRAKNOT_CAMPAIGN={campaign_id}")
+
+
+@grp_campaign.command("deactivate")
+def campaign_deactivate() -> None:
+    """Clear the active campaign."""
+    state = _read_state()
+    state.pop("active_campaign", None)
+    _write_state(state)
+    click.echo("Active campaign cleared.")
+    click.echo("\nIf you set the environment variable, also run:")
+    click.echo("  unset INTRAKNOT_CAMPAIGN")
+
+
+@grp_campaign.command("status")
+def campaign_status() -> None:
+    """Show the currently active campaign."""
+    campaign_id, source = _resolve_active_campaign()
+    if campaign_id:
+        click.echo(f"Active campaign : {campaign_id}")
+        click.echo(f"Source          : {source}")
+    else:
+        click.echo("No active campaign.")
+        click.echo("Use `iknot campaign activate <id>` to set one.")
+
+
+# ---------------------------------------------------------------------------
+# iknot run
+# ---------------------------------------------------------------------------
+
+@main.group("run")
+def grp_run() -> None:
+    """Create and submit simulation runs."""
+
+
+@grp_run.command("create")
+@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.option("--config", "config_src", required=True, type=click.Path(exists=True),
+              help="Path to the run's config.toml (must contain [model]).")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID.  Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory.  Defaults to ./configs.")
+def run_create(
+    run_id: str,
+    config_src: str,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+) -> None:
+    """Create a new run directory."""
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified and no active campaign set.\n"
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    machine = _load_machine(machine_opt)
+    try:
+        run_dir = create_run(
+            run_id=run_id,
+            campaign_id=campaign_id,
+            config_src=Path(config_src),
+            runs_root=Path(runs_root),
+            campaigns_root=Path(campaigns_root),
+            machine=machine,
+        )
+        click.echo(f"Created run: {run_dir}")
+    except (FileExistsError, FileNotFoundError) as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@grp_run.command("submit")
+@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None)
+def run_submit(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
+    """Write a Slurm script and submit it for a run."""
+    machine = _load_machine(machine_opt)
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+        sys.exit(1)
+    try:
+        script = write_slurm_script(run_dir, machine, run_id)
+        click.echo(f"Wrote Slurm script: {script}")
+        job_id = submit_job(run_dir)
+        click.echo(f"Submitted job: {job_id}")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# iknot collect
+# ---------------------------------------------------------------------------
+
+@main.group("collect")
+def grp_collect() -> None:
+    """Collect results and update statuses."""
+
+
+@grp_collect.command("run")
+@click.option("--id", "run_id", required=True)
+@click.option("--runs-root", default="runs", show_default=True)
+def collect_run_cmd(run_id: str, runs_root: str) -> None:
+    """Collect results from a single run into its summary/ directory."""
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run not found: {run_dir}", err=True)
+        sys.exit(1)
+    summary = collect_run(run_dir)
+    click.echo(f"Run {run_id}: state={summary.get('state')} energy={summary.get('energy')}")
+
+
+@grp_collect.command("campaign")
+@click.option("--id", "campaign_id", default=None,
+              help="Campaign ID.  Defaults to active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--runs-root", default="runs", show_default=True)
+def collect_campaign_cmd(
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+) -> None:
+    """Collect results for all runs in a campaign."""
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo("Error: no campaign specified.", err=True)
+        sys.exit(1)
+
+    campaign_dir = Path(campaigns_root) / campaign_id
+    summaries = collect_campaign(campaign_dir, Path(runs_root))
+    for s in summaries:
+        click.echo(f"  {s.get('run_id')}: {s.get('state')}")
+    click.echo(f"\nCollected {len(summaries)} run(s).")
+
+
+# ---------------------------------------------------------------------------
+# iknot resume
+# ---------------------------------------------------------------------------
+
+@main.group("resume")
+def grp_resume() -> None:
+    """Create new attempts for failed or interrupted runs."""
+
+
+@grp_resume.command("run")
+@click.option("--id", "run_id", required=True)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None)
+@click.option("--no-submit", is_flag=True, default=False,
+              help="Create attempt directory without submitting to Slurm.")
+def resume_run_cmd(
+    run_id: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+    no_submit: bool,
+) -> None:
+    """Resume a single failed run."""
+    machine = _load_machine(machine_opt)
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run not found: {run_dir}", err=True)
+        sys.exit(1)
+    try:
+        attempt = resume_run(run_dir, machine, submit=not no_submit)
+        click.echo(f"Created attempt: {attempt}")
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@grp_resume.command("campaign")
+@click.option("--id", "campaign_id", default=None)
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None)
+@click.option("--no-submit", is_flag=True, default=False)
+def resume_campaign_cmd(
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+    no_submit: bool,
+) -> None:
+    """Resume all resumable runs in a campaign."""
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo("Error: no campaign specified.", err=True)
+        sys.exit(1)
+
+    machine = _load_machine(machine_opt)
+    campaign_dir = Path(campaigns_root) / campaign_id
+    resumed = resume_campaign(campaign_dir, Path(runs_root), machine, submit=not no_submit)
+    if resumed:
+        for p in resumed:
+            click.echo(f"  resumed: {p}")
+        click.echo(f"\nResumed {len(resumed)} run(s).")
+    else:
+        click.echo("No resumable runs found.")
+
+
+# ---------------------------------------------------------------------------
+# iknot status
+# ---------------------------------------------------------------------------
+
+@main.command("status")
+@click.option("--id", "run_id", required=True)
+@click.option("--runs-root", default="runs", show_default=True)
+def cmd_status(run_id: str, runs_root: str) -> None:
+    """Print the status of a run."""
+    run_dir = Path(runs_root) / run_id
+    status_path = run_dir / "main" / "status.json"
+    if not status_path.exists():
+        click.echo(f"No status found for run: {run_id}")
+        return
+
+    try:
+        s = read_status(status_path)
+    except (KeyError, ValueError) as e:
+        click.echo(f"Error reading status: {e}", err=True)
+        sys.exit(1)
+
+    if isinstance(s, MainStatus):
+        click.echo(f"Run             : {run_id}")
+        click.echo(f"State           : {s.state.value}")
+        click.echo(f"Current attempt : {s.current_attempt or '—'}")
+        click.echo(f"Reason          : {s.reason.value if s.reason else '—'}")
+        click.echo(f"Restartable     : {s.restartable}")
+
+        # Also show summary observables if available.
+        obs_path = run_dir / "summary" / "observables.json"
+        if obs_path.exists():
+            try:
+                obs = json.loads(obs_path.read_text())
+                energy = obs.get("energy")
+                converged = obs.get("converged")
+                if energy is not None:
+                    click.echo(f"Energy          : {energy:.10f}")
+                if converged is not None:
+                    click.echo(f"Converged       : {converged}")
+            except (json.JSONDecodeError, OSError):
+                pass
+    else:
+        click.echo(json.dumps(s.to_dict(), indent=2))
