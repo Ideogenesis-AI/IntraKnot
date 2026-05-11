@@ -1,0 +1,132 @@
+"""Tests for src/intraknot/collect.py."""
+
+import json
+from pathlib import Path
+
+import pytest
+
+from intraknot.collect import collect_campaign, collect_run
+from intraknot.status import AttemptStatus, FailureReason, MainStatus, RunState, write_status
+
+
+def _make_run_dir(tmp_path: Path, run_id: str, state: RunState, energy: float = -1.23) -> Path:
+    """Create a minimal but realistic run directory for testing."""
+    run_dir = tmp_path / run_id
+    (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
+    (run_dir / "summary").mkdir()
+
+    write_status(
+        run_dir / "main" / "status.json",
+        MainStatus(
+            state=state,
+            current_attempt="attempt_01",
+            reason=FailureReason.CONVERGED if state == RunState.COMPLETED else None,
+            restartable=state == RunState.FAILED,
+        ),
+    )
+
+    obs = {"energy": energy, "converged": state == RunState.COMPLETED, "n_sweeps": 5}
+    (run_dir / "main" / "attempts" / "attempt_01" / "observables.json").write_text(
+        json.dumps(obs)
+    )
+
+    # current symlink
+    current = run_dir / "main" / "current"
+    try:
+        current.symlink_to(Path("attempts") / "attempt_01")
+    except OSError:
+        (run_dir / "main" / "current.txt").write_text("attempt_01\n")
+
+    return run_dir
+
+
+class TestCollectRun:
+    def test_collects_completed_run(self, tmp_path):
+        run_dir = _make_run_dir(tmp_path, "run01", RunState.COMPLETED, energy=-42.5)
+        summary = collect_run(run_dir)
+        assert summary["run_id"] == "run01"
+        assert summary["state"] == "completed"
+        assert summary["energy"] == pytest.approx(-42.5)
+
+    def test_writes_summary_files(self, tmp_path):
+        run_dir = _make_run_dir(tmp_path, "run02", RunState.FAILED)
+        collect_run(run_dir)
+        assert (run_dir / "summary" / "status.json").exists()
+        assert (run_dir / "summary" / "observables.json").exists()
+
+    def test_missing_observables_does_not_crash(self, tmp_path):
+        run_dir = tmp_path / "run03"
+        (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
+        (run_dir / "summary").mkdir()
+        write_status(
+            run_dir / "main" / "status.json",
+            MainStatus(state=RunState.RUNNING, current_attempt="attempt_01"),
+        )
+        summary = collect_run(run_dir)
+        assert summary["state"] == "running"
+
+    def test_no_current_attempt(self, tmp_path):
+        run_dir = tmp_path / "run04"
+        (run_dir / "main").mkdir(parents=True)
+        (run_dir / "summary").mkdir()
+        write_status(run_dir / "main" / "status.json", MainStatus(state=RunState.PENDING))
+        summary = collect_run(run_dir)
+        assert summary["state"] == "pending"
+
+
+class TestCollectCampaign:
+    def _make_runs_csv(self, campaign_dir: Path, run_ids: list[str]) -> None:
+        import csv
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        with open(campaign_dir / "runs.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "status"])
+            for rid in run_ids:
+                writer.writerow([rid, "pending"])
+
+    def test_collects_all_runs(self, tmp_path):
+        campaign_dir = tmp_path / "campaigns" / "c1"
+        runs_root = tmp_path / "runs"
+        runs_root.mkdir()
+        self._make_runs_csv(campaign_dir, ["r1", "r2"])
+        _make_run_dir(runs_root, "r1", RunState.COMPLETED)
+        _make_run_dir(runs_root, "r2", RunState.FAILED)
+
+        summaries = collect_campaign(campaign_dir, runs_root)
+        assert len(summaries) == 2
+        states = {s["run_id"]: s["state"] for s in summaries}
+        assert states["r1"] == "completed"
+        assert states["r2"] == "failed"
+
+    def test_updates_runs_csv(self, tmp_path):
+        import csv as _csv
+        campaign_dir = tmp_path / "campaigns" / "c2"
+        runs_root = tmp_path / "runs2"
+        runs_root.mkdir()
+        self._make_runs_csv(campaign_dir, ["r1"])
+        _make_run_dir(runs_root, "r1", RunState.COMPLETED)
+
+        collect_campaign(campaign_dir, runs_root)
+
+        with open(campaign_dir / "runs.csv") as f:
+            rows = list(_csv.DictReader(f))
+        assert rows[0]["status"] == "completed"
+
+    def test_missing_run_dir_is_reported(self, tmp_path):
+        campaign_dir = tmp_path / "campaigns" / "c3"
+        runs_root = tmp_path / "runs3"
+        runs_root.mkdir()
+        self._make_runs_csv(campaign_dir, ["ghost"])
+
+        summaries = collect_campaign(campaign_dir, runs_root)
+        assert summaries[0]["state"] == "missing"
+
+    def test_empty_csv_returns_empty_list(self, tmp_path):
+        campaign_dir = tmp_path / "campaigns" / "c4"
+        campaign_dir.mkdir(parents=True)
+        import csv as _csv
+        with open(campaign_dir / "runs.csv", "w") as f:
+            _csv.writer(f).writerow(["run_id", "status"])
+
+        summaries = collect_campaign(campaign_dir, tmp_path / "runs4")
+        assert summaries == []
