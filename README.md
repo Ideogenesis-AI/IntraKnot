@@ -79,18 +79,20 @@ python             = "uv run"
 
 ### Campaigns
 
-A campaign records which runs belong together and why. Each campaign also carries a `defaults.toml` with algorithm and output settings shared by all its runs.
+A campaign records which runs belong together and why. Each campaign also carries a `defaults.toml` with settings shared by all its runs.
 
 ```
 campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: id, description, algorithm, created_at
-├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
+├── defaults.toml       # TOML: default [model], [algorithm], and [output] for all runs
 ├── runs.csv            # CSV: parameter table and per-run status
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
 └── algorithm/
     └── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
 ```
+
+`defaults.toml` can carry a `[model]` section in addition to `[algorithm]` and `[output]`. When all runs in a campaign share the same physical model (lattice, Hamiltonian, symmetry), putting `[model]` there means `iknot run create` needs no `--config` argument at all. The `[model]` section is intentionally absent from the generated template — it is specific to each campaign's scientific topic and must be filled in by hand.
 
 `runs.csv` maps array indices to run directories and tracks status:
 
@@ -221,7 +223,9 @@ The active campaign is read from the `INTRAKNOT_CAMPAIGN` environment variable (
 
 ```bash
 # With an active campaign, --campaign is inferred automatically
-iknot run create heis_L64_chi128_g1.0 --config my_model.toml
+iknot run create heis_L64_chi128_g1.0           # uses config.toml in the current directory,
+                                                 # or campaign defaults.toml alone if absent
+iknot run create heis_L64_chi128_g1.0 --config my_model.toml  # explicit path
 
 # Run directly on the current machine (no Slurm required)
 iknot run start heis_L64_chi128_g1.0
