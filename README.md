@@ -37,13 +37,13 @@ intraknot/
 │       ├── status.py        # status model definitions
 │       └── algorithm/
 │           └── run_dmrg.py  # IntraKnot-aware DMRG runner
-├── configs/                 # machine, path, and scheduler settings (git-ignored)
-├── campaigns/               # scientific groupings and run indexes (git-ignored)
-├── runs/                    # actual simulation cases (git-ignored)
-└── notebooks/               # inspection, comparison, and plotting (git-ignored)
+├── configs/                 # machine, path, and scheduler settings
+├── campaigns/               # scientific groupings and run indexes
+├── runs/                    # actual simulation cases
+└── notebooks/               # inspection, comparison, and plotting
 ```
 
-`configs/`, `campaigns/`, `runs/`, and `notebooks/` are created by `iknot init` and are excluded from git (each contains a `.gitignore` with `*`). Only the source code and tests are version-controlled.
+`configs/`, `campaigns/`, `runs/`, and `notebooks/` are created by `iknot init`. In the IntraKnot source repository itself each directory also receives a `.gitignore` that excludes its contents from git, so that test data and credentials are never accidentally committed. In user projects no `.gitignore` files are written, leaving git-tracking decisions to the user.
 
 ### Configuration
 
@@ -197,7 +197,7 @@ Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan
 iknot init
 ```
 
-Creates `configs/`, `campaigns/`, `runs/`, and `notebooks/`, each with a `.gitignore`. Also writes template `configs/slurm.toml` and `configs/paths.toml` for the user to fill in.
+Creates `configs/`, `campaigns/`, `runs/`, and `notebooks/`, and writes template `configs/slurm.toml` and `configs/paths.toml` for the user to fill in. When run inside the IntraKnot source repository, each directory also receives a `.gitignore` that excludes its contents from git.
 
 ### Campaign session
 
