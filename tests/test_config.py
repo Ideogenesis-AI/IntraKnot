@@ -170,31 +170,31 @@ class TestTemplateGenerators:
 
 class TestMergeDefaults:
     def test_adds_missing_sections(self):
-        user = {"model": {"geometry": {"lx": 32}}}
+        user = {"geometry": {"lx": 32}, "model": {"label": "Heisenberg"}}
         defaults = {"algorithm": {"max_bond": 64}, "output": {"save_state": True}}
         merged = _merge_defaults(user, defaults)
-        assert merged["model"]["geometry"]["lx"] == 32
+        assert merged["geometry"]["lx"] == 32
+        assert merged["model"]["label"] == "Heisenberg"
         assert merged["algorithm"]["max_bond"] == 64
         assert merged["output"]["save_state"] is True
 
-    def test_model_from_defaults_when_user_has_none(self):
+    def test_geometry_and_model_from_defaults_when_user_has_none(self):
         defaults = {
-            "model": {"geometry": {"lx": 64}, "model": {"label": "Heisenberg"}},
+            "geometry": {"lattice": "chain", "lx": 20},
+            "model": {"label": "Heisenberg", "category": "bosonic"},
             "algorithm": {"max_bond": 64},
         }
         merged = _merge_defaults(None, defaults)
-        assert merged["model"]["geometry"]["lx"] == 64
-        assert merged["model"]["model"]["label"] == "Heisenberg"
+        assert merged["geometry"]["lx"] == 20
+        assert merged["model"]["label"] == "Heisenberg"
         assert merged["algorithm"]["max_bond"] == 64
 
-    def test_run_model_overrides_default_model(self):
-        # When the run provides [model], it fully replaces the defaults [model].
-        # Sub-sections (geometry, model) are not deep-merged — the run's block wins.
-        user = {"model": {"geometry": {"lx": 128, "bcx": "OBC"}}}
-        defaults = {"model": {"geometry": {"lx": 64, "bcx": "PBC"}}}
+    def test_run_geometry_overrides_default_geometry(self):
+        user = {"geometry": {"lx": 128, "bcx": "OBC"}}
+        defaults = {"geometry": {"lx": 64, "bcx": "PBC"}}
         merged = _merge_defaults(user, defaults)
-        assert merged["model"]["geometry"]["lx"] == 128
-        assert merged["model"]["geometry"]["bcx"] == "OBC"
+        assert merged["geometry"]["lx"] == 128
+        assert merged["geometry"]["bcx"] == "OBC"
 
     def test_run_values_win(self):
         user = {"algorithm": {"max_bond": 128}}
@@ -204,7 +204,7 @@ class TestMergeDefaults:
         assert merged["algorithm"]["n_sweeps"] == 10
 
     def test_no_defaults_is_identity(self):
-        user = {"model": {}}
+        user = {"geometry": {}, "model": {}}
         merged = _merge_defaults(user, {})
         assert merged == user
 
