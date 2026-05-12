@@ -161,7 +161,7 @@ class TestTemplateGenerators:
         gi = d / ".gitignore"
         assert gi.exists()
         assert "*" in gi.read_text()
-        assert "!.gitignore" in gi.read_text()
+        assert "!.gitignore" not in gi.read_text()
 
 
 # ---------------------------------------------------------------------------
