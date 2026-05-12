@@ -295,8 +295,10 @@ def grp_run() -> None:
 
 @grp_run.command("create")
 @click.argument("run_id")
-@click.option("--config", "config_src", required=True, type=click.Path(exists=True),
-              help="Path to the run's config.toml (must contain [model]).")
+@click.option("--config", "config_src", default=None, type=click.Path(),
+              help="Path to a per-run config.toml with overrides. "
+                   "Falls back to config.toml in the current directory, "
+                   "then to the campaign defaults.toml alone.")
 @click.option("--campaign", "campaign_id", default=None,
               help="Campaign ID. Defaults to the active campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
@@ -305,7 +307,7 @@ def grp_run() -> None:
               help="Path to configs/ directory. Defaults to ./configs.")
 def run_create(
     run_id: str,
-    config_src: str,
+    config_src: Optional[str],
     campaign_id: Optional[str],
     campaigns_root: str,
     runs_root: str,
@@ -322,12 +324,22 @@ def run_create(
         )
         sys.exit(1)
 
+    # Resolve config path: explicit → CWD default → None (campaign defaults only).
+    if config_src is not None:
+        config_path: Optional[Path] = Path(config_src)
+        if not config_path.exists():
+            click.echo(f"Error: config file not found: {config_path}", err=True)
+            sys.exit(1)
+    else:
+        cwd_default = Path.cwd() / "config.toml"
+        config_path = cwd_default if cwd_default.exists() else None
+
     machine = _load_machine(machine_opt)
     try:
         run_dir = create_run(
             run_id=run_id,
             campaign_id=campaign_id,
-            config_src=Path(config_src),
+            config_src=config_path,
             runs_root=Path(runs_root),
             campaigns_root=Path(campaigns_root),
             machine=machine,
