@@ -33,7 +33,7 @@ intraknot/
 │       ├── config.py        # config loaders and template generators
 │       ├── launch.py        # directory creation and job submission
 │       ├── collect.py       # result and status collection
-│       ├── retry.py         # new-attempt creation for failed runs
+│       ├── resume.py        # new-attempt creation for failed or interrupted runs
 │       ├── status.py        # status model definitions
 │       └── algorithm/
 │           └── run_dmrg.py  # IntraKnot-aware DMRG runner
@@ -157,7 +157,7 @@ max_bond     = 128
 n_sweeps     = 20
 e_tol        = 1.0e-8
 trunc_thresh = 1.0e-15
-init         = "iter_diag"
+init         = "random"
 
 [output]
 save_state      = true
@@ -231,7 +231,7 @@ iknot run submit --id heis_L64_chi128_g1.0
 ```bash
 iknot collect campaign --id heisenberg_dmrg_chi_scan
 
-iknot retry campaign --id heisenberg_dmrg_chi_scan
+iknot resume campaign --id heisenberg_dmrg_chi_scan
 ```
 
 ### Inspect a single run
