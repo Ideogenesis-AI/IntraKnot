@@ -177,6 +177,25 @@ class TestMergeDefaults:
         assert merged["algorithm"]["max_bond"] == 64
         assert merged["output"]["save_state"] is True
 
+    def test_model_from_defaults_when_user_has_none(self):
+        defaults = {
+            "model": {"geometry": {"lx": 64}, "model": {"label": "Heisenberg"}},
+            "algorithm": {"max_bond": 64},
+        }
+        merged = _merge_defaults(None, defaults)
+        assert merged["model"]["geometry"]["lx"] == 64
+        assert merged["model"]["model"]["label"] == "Heisenberg"
+        assert merged["algorithm"]["max_bond"] == 64
+
+    def test_run_model_overrides_default_model(self):
+        # When the run provides [model], it fully replaces the defaults [model].
+        # Sub-sections (geometry, model) are not deep-merged — the run's block wins.
+        user = {"model": {"geometry": {"lx": 128, "bcx": "OBC"}}}
+        defaults = {"model": {"geometry": {"lx": 64, "bcx": "PBC"}}}
+        merged = _merge_defaults(user, defaults)
+        assert merged["model"]["geometry"]["lx"] == 128
+        assert merged["model"]["geometry"]["bcx"] == "OBC"
+
     def test_run_values_win(self):
         user = {"algorithm": {"max_bond": 128}}
         defaults = {"algorithm": {"max_bond": 64, "n_sweeps": 10}}
