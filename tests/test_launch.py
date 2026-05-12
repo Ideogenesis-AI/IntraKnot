@@ -61,8 +61,8 @@ def _make_machine() -> MachineConfig:
 def _minimal_config_toml(tmp_path: Path) -> Path:
     p = tmp_path / "config.toml"
     p.write_text(
-        "[model.geometry]\nlattice = \"chain\"\nlx = 16\n"
-        "[model.model]\ncategory = \"bosonic\"\nlabel = \"Heisenberg\"\n"
+        "[geometry]\nlattice = \"chain\"\nlx = 16\n"
+        "[model]\ncategory = \"bosonic\"\nlabel = \"Heisenberg\"\n"
         "symmetry = \"U1\"\nspin = 0.5\nJ = 1.0\n"
     )
     return p
