@@ -284,7 +284,7 @@ node_local_scratch = "/tmp/$USER"  # Per-node local scratch
 python             = "uv run"    # Command used to invoke the runner script
 """
 
-_GITIGNORE_CONTENT = "*\n!.gitignore\n"
+_GITIGNORE_CONTENT = "*\n"
 
 
 def write_machines_yaml(path: Path) -> None:
