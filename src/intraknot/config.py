@@ -248,7 +248,7 @@ def load_run_config(run_dir: Path) -> Dict[str, Any]:
 
 _MACHINES_YAML_TEMPLATE = """\
 # configs/machines.yaml
-# Registry of known HPC clusters.  This file is for human reference only;
+# Registry of known HPC clusters. This file is for human reference only;
 # machine-specific submission settings live in slurm.toml and paths.toml.
 #
 # machines:
@@ -263,7 +263,7 @@ machines: []
 
 _SLURM_TOML_TEMPLATE = """\
 # configs/slurm.toml
-# Slurm scheduler settings.  Fill in the values for your cluster.
+# Slurm scheduler settings. Fill in the values for your cluster.
 
 [slurm]
 account           = ""          # Slurm account / project code
@@ -275,7 +275,7 @@ default_cpus_per_task = 8       # Default CPUs per task
 
 _PATHS_TOML_TEMPLATE = """\
 # configs/paths.toml
-# Filesystem path settings.  Fill in the paths for your cluster.
+# Filesystem path settings. Fill in the paths for your cluster.
 
 [paths]
 run_root           = ""          # Root directory for run subdirectories
@@ -332,7 +332,7 @@ def write_data_gitignore(directory: Path) -> None:
     Parameters
     ----------
     directory:
-        Target directory.  Created if absent.
+        Target directory. Created if absent.
     """
     directory.mkdir(parents=True, exist_ok=True)
     (directory / ".gitignore").write_text(_GITIGNORE_CONTENT)
@@ -345,13 +345,13 @@ def _merge_defaults(
     """Merge campaign-level defaults with a run-level config dict.
 
     The campaign provides fallback `[algorithm]` and `[output]` sections.
-    Run-level keys take precedence over campaign defaults.  The `[model]`
+    Run-level keys take precedence over campaign defaults. The `[model]`
     section is never touched by this function.
 
     Parameters
     ----------
     user_cfg:
-        Run-level TOML dict (must contain at least `[model]`).  If `None`,
+        Run-level TOML dict (must contain at least `[model]`). If `None`,
         an empty dict is used as the starting point.
     campaign_defaults:
         Dict loaded from `campaign/defaults.toml`.

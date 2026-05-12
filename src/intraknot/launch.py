@@ -58,7 +58,7 @@ def _dump_toml(data: dict, _prefix: str = "") -> str:
     """Serialize a nested dict to a TOML string.
 
     Handles two levels of nesting (e.g. `[model.geometry]`) as used in
-    IntraKnot configs.  Inline tables and arrays-of-tables are not supported.
+    IntraKnot configs. Inline tables and arrays-of-tables are not supported.
 
     Parameters
     ----------
@@ -314,10 +314,10 @@ def create_campaign(
         "n_sweeps     = 20\n"
         "e_tol        = 1.0e-8\n"
         "trunc_thresh = 1.0e-15\n"
-        "init         = \"random\"\n\n"
+        "init         = \"product\"  # 'product', 'random', or 'resume'\n"
+        "seed         = 42\n\n"
         "[output]\n"
         "save_state      = true\n"
-        "save_checkpoint = true\n"
         "observables     = [\"energy\", \"entropy\"]\n"
     )
 
@@ -355,14 +355,14 @@ def create_run(
 
     Copies `config_src` into the run directory as `config.toml`, merging in
     the campaign's `defaults.toml` for any missing `[algorithm]` or `[output]`
-    sections.  Also copies the campaign's algorithm runner script.
+    sections. Also copies the campaign's algorithm runner script.
 
     Parameters
     ----------
     run_id:
         Unique run identifier (used as directory name).
     campaign_id:
-        Associated campaign.  The campaign must already exist under
+        Associated campaign. The campaign must already exist under
         `campaigns_root`.
     config_src:
         Path to a TOML file containing at least a `[model]` section.
@@ -448,7 +448,7 @@ def create_run(
 def create_attempt(run_dir: Path) -> Path:
     """Create the next `attempt_NN` directory under `main/attempts/`.
 
-    The attempt index is one more than the highest existing index.  Creates
+    The attempt index is one more than the highest existing index. Creates
     the directory and updates `main/current`.
 
     Parameters
@@ -494,7 +494,7 @@ def write_slurm_script(
     machine:
         Machine configuration supplying Slurm and path settings.
     run_id:
-        Run identifier used as the Slurm job name.  Defaults to the directory
+        Run identifier used as the Slurm job name. Defaults to the directory
         name of `run_dir`.
 
     Returns
@@ -546,7 +546,7 @@ def write_array_slurm_script(
     array_range:
         Slurm array range string, e.g. `"1-10"` or `"1,3,5"`.
     campaign_id:
-        Campaign identifier for the job name.  Defaults to the directory name.
+        Campaign identifier for the job name. Defaults to the directory name.
 
     Returns
     -------
@@ -577,13 +577,13 @@ def write_array_slurm_script(
 def submit_job(run_dir: Path) -> str:
     """Submit the Slurm job for a run and record the job ID.
 
-    Calls `sbatch submit/submit.slurm` from within `run_dir`.  The assigned
+    Calls `sbatch submit/submit.slurm` from within `run_dir`. The assigned
     job ID is written to `submit/job_id.txt`.
 
     Parameters
     ----------
     run_dir:
-        Root of the run directory.  Must contain `submit/submit.slurm`.
+        Root of the run directory. Must contain `submit/submit.slurm`.
 
     Returns
     -------
@@ -601,13 +601,13 @@ def submit_job(run_dir: Path) -> str:
     if not script.exists():
         raise FileNotFoundError(f"Slurm script not found: {script}")
 
-    result = subprocess.run(
+    proc = subprocess.run(
         ["sbatch", str(script)],
         capture_output=True,
         text=True,
         check=True,
     )
     # sbatch output: "Submitted batch job 12345678"
-    job_id = result.stdout.strip().split()[-1]
+    job_id = proc.stdout.strip().split()[-1]
     (run_dir / "submit" / "job_id.txt").write_text(job_id + "\n")
     return job_id

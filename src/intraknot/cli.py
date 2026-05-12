@@ -140,7 +140,7 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     """Initialise the IntraKnot project skeleton.
 
     Creates configs/, campaigns/, runs/, and notebooks/ with .gitignore
-    files that exclude all contents from git.  Writes template
+    files that exclude all contents from git. Writes template
     configs/slurm.toml, configs/paths.toml, and configs/machines.yaml.
     Appends .iknot_state to the root .gitignore.
     """
@@ -179,7 +179,7 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
         root_gitignore.write_text(entry)
     click.echo("  updated .gitignore")
 
-    click.echo("\nDone.  Edit configs/slurm.toml and configs/paths.toml before submitting jobs.")
+    click.echo("\nDone. Edit configs/slurm.toml and configs/paths.toml before submitting jobs.")
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +267,11 @@ def grp_run() -> None:
 @click.option("--config", "config_src", required=True, type=click.Path(exists=True),
               help="Path to the run's config.toml (must contain [model]).")
 @click.option("--campaign", "campaign_id", default=None,
-              help="Campaign ID.  Defaults to the active campaign.")
+              help="Campaign ID. Defaults to the active campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None,
-              help="Path to configs/ directory.  Defaults to ./configs.")
+              help="Path to configs/ directory. Defaults to ./configs.")
 def run_create(
     run_id: str,
     config_src: str,
@@ -352,7 +352,7 @@ def collect_run_cmd(run_id: str, runs_root: str) -> None:
 
 @grp_collect.command("campaign")
 @click.option("--id", "campaign_id", default=None,
-              help="Campaign ID.  Defaults to active campaign.")
+              help="Campaign ID. Defaults to active campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
 def collect_campaign_cmd(
