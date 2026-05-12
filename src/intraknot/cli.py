@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -57,6 +58,7 @@ from .launch import (
     create_attempt,
     create_campaign,
     create_run,
+    start_run,
     submit_job,
     write_slurm_script,
 )
@@ -334,6 +336,51 @@ def run_create(
     except (FileExistsError, FileNotFoundError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+@grp_run.command("start")
+@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+@click.option("--python", "python_cmd", default=None,
+              help="Python command to invoke the runner (e.g. 'uv run'). "
+                   "Overrides the machine config value. Defaults to 'python' "
+                   "when no machine config is available.")
+def run_start(
+    run_id: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+    python_cmd: Optional[str],
+) -> None:
+    """Run the algorithm script directly, without Slurm.
+
+    Useful when Slurm is not available (e.g. on a workstation or in
+    interactive testing). The runner process runs in the foreground and its
+    output is streamed directly to the terminal.
+    """
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+        sys.exit(1)
+
+    if python_cmd is None:
+        try:
+            machine = _load_machine(machine_opt)
+            python_cmd = machine.paths.python
+        except Exception:
+            python_cmd = "python"
+
+    click.echo(f"Starting run: {run_dir}")
+    click.echo(f"Python command: {python_cmd}")
+    try:
+        start_run(run_dir, python_cmd)
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Runner exited with status {e.returncode}.", err=True)
+        sys.exit(e.returncode)
 
 
 @grp_run.command("submit")
