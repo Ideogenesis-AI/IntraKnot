@@ -223,7 +223,7 @@ def grp_campaign() -> None:
 
 
 @grp_campaign.command("create")
-@click.option("--id", "campaign_id", required=True, help="Campaign identifier.")
+@click.argument("campaign_id")
 @click.option("--description", default="", help="Human-readable description.")
 @click.option("--algorithm", default="dmrg", show_default=True,
               help="Algorithm runner to copy into the campaign.")
@@ -294,7 +294,7 @@ def grp_run() -> None:
 
 
 @grp_run.command("create")
-@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.argument("run_id")
 @click.option("--config", "config_src", required=True, type=click.Path(exists=True),
               help="Path to the run's config.toml (must contain [model]).")
 @click.option("--campaign", "campaign_id", default=None,
@@ -339,7 +339,7 @@ def run_create(
 
 
 @grp_run.command("start")
-@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None,
               help="Path to configs/ directory. Defaults to ./configs.")
@@ -384,7 +384,7 @@ def run_start(
 
 
 @grp_run.command("submit")
-@click.option("--id", "run_id", required=True, help="Run identifier.")
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None)
 def run_submit(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
@@ -414,7 +414,7 @@ def grp_collect() -> None:
 
 
 @grp_collect.command("run")
-@click.option("--id", "run_id", required=True)
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 def collect_run_cmd(run_id: str, runs_root: str) -> None:
     """Collect results from a single run into its summary/ directory."""
@@ -460,7 +460,7 @@ def grp_resume() -> None:
 
 
 @grp_resume.command("run")
-@click.option("--id", "run_id", required=True)
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None)
 @click.option("--no-submit", is_flag=True, default=False,
@@ -521,7 +521,7 @@ def resume_campaign_cmd(
 # ---------------------------------------------------------------------------
 
 @main.command("status")
-@click.option("--id", "run_id", required=True)
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 def cmd_status(run_id: str, runs_root: str) -> None:
     """Print the status of a run."""
