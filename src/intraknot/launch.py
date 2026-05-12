@@ -308,6 +308,9 @@ def create_campaign(
     (campaign_dir / "defaults.toml").write_text(
         "# Campaign-level default settings.\n"
         "# Values here are inherited by all runs and can be overridden per-run.\n\n"
+        "# [model] — add the [model.geometry] and [model.model] sections here\n"
+        "# when all runs in this campaign share the same physical model.\n"
+        "# Per-run overrides can still be supplied via `iknot run create --config`.\n\n"
         "[algorithm]\n"
         "name         = \"dmrg\"\n"
         "scheme       = \"2s\"\n"
@@ -347,16 +350,19 @@ def create_campaign(
 def create_run(
     run_id: str,
     campaign_id: str,
-    config_src: Path,
+    config_src: Optional[Path],
     runs_root: Path,
     campaigns_root: Path,
     machine: Optional[MachineConfig] = None,
 ) -> Path:
     """Create a new run directory with all standard files and subdirectories.
 
-    Copies `config_src` into the run directory as `config.toml`, merging in
-    the campaign's `defaults.toml` for any missing `[algorithm]` or `[output]`
-    sections. Also copies the campaign's algorithm runner script.
+    Merges `config_src` (if given) with the campaign's `defaults.toml` to
+    produce the run's `config.toml`. The `[model]`, `[algorithm]`, and
+    `[output]` sections from `defaults.toml` serve as fallbacks; run-level
+    values always win. When `config_src` is `None`, the campaign defaults
+    alone form the full configuration — useful when `defaults.toml` already
+    carries `[model]`.
 
     Parameters
     ----------
@@ -366,7 +372,9 @@ def create_run(
         Associated campaign. The campaign must already exist under
         `campaigns_root`.
     config_src:
-        Path to a TOML file containing at least a `[model]` section.
+        Path to a TOML file containing per-run overrides (typically at least
+        `[model]`). Pass `None` to rely entirely on the campaign's
+        `defaults.toml`.
     runs_root:
         Parent directory where the run subdirectory is created.
     campaigns_root:
@@ -396,7 +404,7 @@ def create_run(
         raise FileNotFoundError(f"Campaign not found: {campaign_dir}")
 
     # Load and merge configs.
-    user_cfg = load_config(config_src)
+    user_cfg = load_config(config_src) if config_src is not None else None
     defaults = load_campaign_defaults(campaign_dir)
     merged_cfg = _merge_defaults(user_cfg, defaults)
 
