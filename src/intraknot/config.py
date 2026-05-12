@@ -344,15 +344,17 @@ def _merge_defaults(
 ) -> Dict[str, Any]:
     """Merge campaign-level defaults with a run-level config dict.
 
-    The campaign provides fallback `[algorithm]` and `[output]` sections.
-    Run-level keys take precedence over campaign defaults. The `[model]`
-    section is never touched by this function.
+    The campaign provides fallback `[model]`, `[algorithm]`, and `[output]`
+    sections. Run-level keys take precedence over campaign defaults at every
+    level. This allows a campaign's `defaults.toml` to define the full model
+    for a parameter study, with individual runs overriding only the keys that
+    differ.
 
     Parameters
     ----------
     user_cfg:
-        Run-level TOML dict (must contain at least `[model]`). If `None`,
-        an empty dict is used as the starting point.
+        Run-level TOML dict. If `None`, the campaign defaults alone form the
+        starting configuration.
     campaign_defaults:
         Dict loaded from `campaign/defaults.toml`.
 
@@ -366,7 +368,7 @@ def _merge_defaults(
         merged.update(user_cfg)
 
     # Apply campaign defaults for sections absent in the run config.
-    for section in ("algorithm", "output"):
+    for section in ("model", "algorithm", "output"):
         if section in campaign_defaults and section not in merged:
             merged[section] = dict(campaign_defaults[section])
         elif section in campaign_defaults and section in merged:
