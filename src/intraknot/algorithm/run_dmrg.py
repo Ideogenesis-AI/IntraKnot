@@ -19,7 +19,7 @@
 """IntraKnot-aware DMRG runner.
 
 This script is a standalone entry point executed by Slurm from within a run
-directory.  It reads `config.toml`, builds the Hamiltonian via Alice, runs
+directory. It reads `config.toml`, builds the Hamiltonian via Alice, runs
 DMRG, and writes all outputs to the attempt directory.
 
 Usage
@@ -27,26 +27,52 @@ Usage
     uv run run_dmrg.py --run-dir /path/to/runs/my_run
 
 The script resolves the next attempt automatically by inspecting
-`main/attempts/` and incrementing the highest existing index.  If a previous
-attempt left a `dmrg.ckpt`, the MPS is loaded from it; otherwise a fresh
-random MPS is initialised.
+`main/attempts/` and incrementing the highest existing index. If a previous
+attempt left a `dmrg.ckpt`, the MPS state is loaded from it and DMRG
+continues from the last completed sweep; otherwise a fresh MPS is initialized
+via `alice.init_mps`.
+
+MPS initialisation
+------------------
+`alice.init_mps` is used for all fresh starts. The `[algorithm]` section
+controls the initial bond dimension and random seed:
+
+    [algorithm]
+    init     = "random"   # "random" (default) or "product"
+    max_bond = 32         # bond dimension for init="random"; ignored for "product"
+    seed     = 42         # random seed for init="random"
+
+- `init = "product"` calls `init_mps(..., bond_dim=1)` — a deterministic
+  product state; recommended as the starting point for 2-site or CBE DMRG.
+- `init = "random"` calls `init_mps(..., bond_dim=max_bond)` — a random MPS
+  pre-populated with the correct symmetry structure.
+
+DMRG checkpointing
+------------------
+Alice writes `dmrg.ckpt` atomically after every completed sweep, mirroring
+the convention of `configure_logging`. IntraKnot sets `checkpoint_dir` to
+the current attempt directory so the per-sweep checkpoint always lands there.
+On resumption (`init = "resume"`), IntraKnot loads `dmrg.ckpt` from the most
+recent prior attempt and passes `summary.state` to `dmrg.run` as the initial
+MPS; the remaining sweep budget is reduced by `summary.n_sweeps` so the total
+sweep count stays consistent with the original target.
 
 Outputs (written to `main/attempts/attempt_NN/`)
 ------------------------------------------------
 log.txt
     Alice logging output from this attempt.
 dmrg.ckpt
-    `torch.save` snapshot of the DMRG `Summary` (written after each run,
-    including failed ones where possible).
+    PyTorch checkpoint written by Alice after every sweep (atomic rename from
+    `dmrg_lock.ckpt`). Loadable via `dmrg.Summary.load`.
 state.ckpt
-    Same as `dmrg.ckpt` on successful completion; the canonical
-    final-state file.
+    Final canonical state file; written by IntraKnot on successful
+    completion using `summary.save`.
 observables.json
     Key scalar results: energy, energy_per_site, converged, n_sweeps,
     max_bond_dim.
 convergence.csv
     Per-sweep diagnostics: sweep, energy, delta_energy, discarded_weight,
-    bond_dim, converged.
+    converged.
 status.json
     AttemptStatus record written by IntraKnot (not by Alice).
 """
@@ -61,20 +87,16 @@ import logging
 import math
 import sys
 import tomllib
-import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
-
 import alice
-from alice import MPS, build_hamiltonian, build_interaction
+from alice import MPS, build_hamiltonian, build_interaction, init_mps
 from alice import dmrg
-from nicole import Direction, Tensor, load_space
-from nicole.index import Index, Sector
+from nicole import load_space
 
-# IntraKnot status helpers (imported from the installed package when run from
-# within the project, or from a relative path if the package is not on sys.path).
+# IntraKnot status helpers — imported from the installed package when run via
+# `uv run`, or resolved by climbing the directory tree for direct invocation.
 try:
     from intraknot.status import (
         AttemptStatus,
@@ -114,7 +136,7 @@ logger = logging.getLogger(__name__)
 def _resolve_attempt_dir(run_dir: Path) -> Tuple[Path, str]:
     """Return the path and name of the next attempt directory.
 
-    Creates `main/attempts/` if absent.  The next attempt index is one more
+    Creates `main/attempts/` if absent. The next attempt index is one more
     than the highest existing `attempt_NN` directory.
 
     Parameters
@@ -145,7 +167,7 @@ def _resolve_attempt_dir(run_dir: Path) -> Tuple[Path, str]:
 
 
 def _find_latest_checkpoint(run_dir: Path) -> Optional[Path]:
-    """Return the most recent `dmrg.ckpt` across all attempts, or `None`.
+    """Return the most recent `dmrg.ckpt` across all prior attempts, or `None`.
 
     Iterates attempt directories in reverse order and returns the first
     checkpoint found, so the latest attempt is preferred.
@@ -195,78 +217,76 @@ def _update_current(run_dir: Path, attempt_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MPS initialisation
+# Physical-space helper
 # ---------------------------------------------------------------------------
 
-def _build_random_mps(spc: Any, L: int, bond_dim: int, symmetry: str, seed: int) -> MPS:
-    """Construct a random MPS for the given physical space.
+def _load_space_from_cfg(cfg_model: Dict[str, Any]) -> Tuple[Any, Dict]:
+    """Call `load_space` with the parameters implied by `cfg_model["model"]`.
 
-    Distributes `bond_dim` states evenly across charge sectors.  The MPS is
-    placed in right-canonical form with `center = 0`.
+    `build_interaction` returns `(interactions, Spc, geo)` but does not expose
+    the operator dict `Op` needed by `alice.init_mps`. This helper derives
+    the correct `load_space` call from the model config so the caller can
+    obtain `(Spc, Op)` for MPS initialisation.
+
+    Supported categories: `"bosonic"` (Spin), `"fermionic"` (Ferm),
+    `"conductor"` (Band).
 
     Parameters
     ----------
-    spc:
-        Physical index (Nicole `Index`) for one site.
-    L:
-        Chain length.
-    bond_dim:
-        Total bond dimension distributed across sectors.
-    symmetry:
-        `"U1"` or `"SU2"` (or any Abelian / non-Abelian label understood by
-        the symmetry group stored in `spc`).
-    seed:
-        Base random seed for reproducibility.
+    cfg_model:
+        The `config["model"]` sub-dict (must contain at least
+        `model.model.category` and `model.model.symmetry`).
 
     Returns
     -------
-    MPS
-        Right-canonical random MPS.
+    Spc, Op
+        Physical `Index` and operator dict, as returned by `load_space`.
+
+    Raises
+    ------
+    ValueError
+        For unknown `category` values.
     """
-    # Determine which charge sectors to include in the bond index.
-    # Use ±6 for U1; 0..6 for SU2 (non-negative multiplet labels).
-    Smax = 6
-    if symmetry.upper() == "SU2":
-        bond_charges = list(range(0, Smax + 1))
-    else:
-        bond_charges = list(range(-Smax, Smax + 1))
+    model_cfg = cfg_model.get("model", {})
+    category = model_cfg.get("category", "bosonic").lower()
+    symmetry = model_cfg.get("symmetry", "U1")
 
-    dim_per_sector = max(1, bond_dim // len(bond_charges))
-    bulk = Index(
-        direction=Direction.IN,
-        group=spc.group,
-        sectors=tuple(Sector(charge=q, dim=dim_per_sector) for q in bond_charges),
+    if category == "bosonic":
+        spin = model_cfg.get("spin", 0.5)
+        return load_space("Spin", symmetry, {"J": spin})
+    if category == "fermionic":
+        return load_space("Ferm", symmetry)
+    if category == "conductor":
+        return load_space("Band", symmetry)
+
+    raise ValueError(
+        f"Unknown model category {category!r}. "
+        "Expected 'bosonic', 'fermionic', or 'conductor'."
     )
-    # Vacuum bond (dim-1, charge-0) for the boundaries.
-    vac = Index([Sector(0, 1)], direction=Direction.OUT, group=spc.group)
 
-    tensors = []
-    for i in range(L):
-        l_idx = vac if i == 0 else bulk
-        r_idx = (vac if i == L - 1 else bulk).flip()
-        T = Tensor.random(
-            [l_idx, r_idx, spc],
-            seed=seed + i,
-            itags=[f"A{i:02d}", f"A{i + 1:02d}", f"s{i:02d}"],
-        )
-        tensors.append(T)
 
-    mps = MPS(tensors, center=None)
-    mps.canonical(0)
-    return mps
-
+# ---------------------------------------------------------------------------
+# MPS initialisation
+# ---------------------------------------------------------------------------
 
 def _init_mps(
     cfg_model: Dict[str, Any],
     cfg_algo: Dict[str, Any],
-    spc: Any,
     L: int,
-    checkpoint: Optional[Path],
-) -> MPS:
+    prior_checkpoint: Optional[Path],
+) -> Tuple[MPS, int]:
     """Initialise the MPS for a DMRG run.
 
-    Loads from `checkpoint` if provided and `init` is `"resume"`.
-    Otherwise builds a fresh random MPS.
+    Three strategies controlled by `cfg_algo["init"]`:
+
+    - `"product"` — deterministic product state via `init_mps(..., bond_dim=1)`.
+      Bond dimension grows during DMRG. Best paired with 2-site or CBE DMRG.
+    - `"random"` — random MPS via `init_mps(..., bond_dim=max_bond)`.
+    - `"resume"` — load `summary.state` from `prior_checkpoint` and reduce
+      the sweep budget by the number of sweeps already completed.
+
+    Falls back to `"random"` if `"resume"` is requested but no checkpoint
+    exists.
 
     Parameters
     ----------
@@ -274,39 +294,47 @@ def _init_mps(
         `config["model"]` dict (Alice-compatible).
     cfg_algo:
         `config["algorithm"]` dict.
-    spc:
-        Physical index for one site.
     L:
         Chain length.
-    checkpoint:
-        Path to a `dmrg.ckpt` file from a previous attempt, or `None`.
+    prior_checkpoint:
+        Path to `dmrg.ckpt` from a previous attempt, or `None`.
 
     Returns
     -------
-    MPS
-        Initial MPS in right-canonical form with `center = 0`.
+    mps, sweeps_done
+        The initial MPS in right-canonical form (`center = 0`) and the
+        number of DMRG sweeps already completed (non-zero only when resuming).
     """
     init_strategy = cfg_algo.get("init", "random")
     bond_dim = cfg_algo.get("max_bond", 32)
-    symmetry = cfg_model.get("model", {}).get("symmetry", "U1")
     seed = cfg_algo.get("seed", 42)
 
-    if init_strategy == "resume" and checkpoint is not None:
-        logger.info("Resuming from checkpoint: %s", checkpoint)
-        data = torch.load(checkpoint, weights_only=True)
-        summary = dmrg.Summary.deserialize(data)
-        mps = summary.state
-        mps.canonical(0)
-        return mps
-
-    if init_strategy == "resume" and checkpoint is None:
+    if init_strategy == "resume":
+        if prior_checkpoint is not None:
+            logger.info("Resuming from checkpoint: %s", prior_checkpoint)
+            prev = dmrg.Summary.load(prior_checkpoint)
+            mps = prev.state
+            mps.canonical(0)
+            logger.info(
+                "  loaded %d sweeps, energy=%.10g, converged=%s",
+                prev.n_sweeps, prev.energy, prev.converged,
+            )
+            return mps, prev.n_sweeps
         logger.warning(
-            "init=resume requested but no checkpoint found; falling back to random."
+            "init=resume requested but no prior checkpoint found; "
+            "falling back to random initialisation."
         )
 
-    logger.info("Initialising random MPS: bond_dim=%d, symmetry=%s, seed=%d",
-                bond_dim, symmetry, seed)
-    return _build_random_mps(spc, L, bond_dim=bond_dim, symmetry=symmetry, seed=seed)
+    Spc, Op = _load_space_from_cfg(cfg_model)
+
+    if init_strategy == "product":
+        logger.info("Initialising product-state MPS (bond_dim=1)")
+        mps = init_mps(L, Spc, Op, bond_dim=1, seed=seed)
+    else:
+        logger.info("Initialising random MPS: bond_dim=%d, seed=%d", bond_dim, seed)
+        mps = init_mps(L, Spc, Op, bond_dim=bond_dim, seed=seed)
+
+    return mps, 0
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +345,6 @@ def _write_observables(
     attempt_dir: Path,
     summary: dmrg.Summary,
     L: int,
-    cfg_output: Dict[str, Any],
 ) -> None:
     """Write `observables.json` to the attempt directory.
 
@@ -329,8 +356,6 @@ def _write_observables(
         Completed DMRG summary.
     L:
         Chain length (for per-site energy).
-    cfg_output:
-        `config["output"]` dict (controls which observables are included).
     """
     obs: Dict[str, Any] = {
         "energy": summary.energy,
@@ -407,7 +432,7 @@ def run(run_dir: Path) -> None:
     attempt_dir.mkdir(parents=True, exist_ok=True)
     _update_current(run_dir, attempt_name)
 
-    # Set up logging to both the attempt log file and stderr.
+    # Configure logging to both the attempt log file and stderr.
     alice.configure_logging(log_dir=attempt_dir)
     log_file = attempt_dir / "log.txt"
     file_handler = logging.FileHandler(log_file)
@@ -455,29 +480,37 @@ def run(run_dir: Path) -> None:
         L = geo.L
         logger.info("  chain length: %d", L)
 
-        # Initialise MPS.
-        mps = _init_mps(cfg_model, cfg_algo, spc, L, prior_checkpoint)
+        # Initialise MPS (fresh or resumed from checkpoint).
+        mps, sweeps_done = _init_mps(cfg_model, cfg_algo, L, prior_checkpoint)
 
-        # Build DMRG options from the [algorithm] section.
+        # Build DMRG options from the `[algorithm]` section. Override
+        # checkpoint_dir so Alice writes its per-sweep dmrg.ckpt directly
+        # into the attempt directory.
         opts = dmrg.Options.from_toml(cfg_algo)
+        opts.checkpoint_dir = str(attempt_dir)
+
+        # Reduce the sweep budget when resuming so the total sweep count
+        # relative to the original n_sweeps target stays consistent.
+        if sweeps_done > 0:
+            remaining = max(1, opts.n_sweeps - sweeps_done)
+            logger.info(
+                "  resuming: %d sweep(s) already done, %d remaining",
+                sweeps_done, remaining,
+            )
+            opts.n_sweeps = remaining
 
         # --- Run DMRG ---
         summary = dmrg.run(mps, mpo, opts)
+        # dmrg.ckpt is already written by Alice into attempt_dir after each sweep.
 
-        # Save checkpoint (always).
-        if cfg_output.get("save_checkpoint", True):
-            ckpt_path = attempt_dir / "dmrg.ckpt"
-            torch.save(summary.serialize(), ckpt_path)
-            logger.info("Saved checkpoint: %s", ckpt_path)
-
-        # Save final state.
+        # Save final canonical state.
         if cfg_output.get("save_state", True):
             state_path = attempt_dir / "state.ckpt"
-            torch.save(summary.serialize(), state_path)
+            summary.save(state_path)
             logger.info("Saved final state: %s", state_path)
 
         # Write observables and convergence table.
-        _write_observables(attempt_dir, summary, L, cfg_output)
+        _write_observables(attempt_dir, summary, L)
         _write_convergence(attempt_dir, summary)
 
         # Determine final status.
@@ -524,7 +557,11 @@ def run(run_dir: Path) -> None:
         ),
     )
 
-    logger.info("Attempt finished: state=%s reason=%s", end_state.value, end_reason.value if end_reason else None)
+    logger.info(
+        "Attempt finished: state=%s reason=%s",
+        end_state.value,
+        end_reason.value if end_reason else None,
+    )
 
     if end_state != RunState.COMPLETED:
         sys.exit(1)
