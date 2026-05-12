@@ -110,6 +110,23 @@ def _resolve_active_campaign() -> tuple[Optional[str], str]:
 # Machine config helper
 # ---------------------------------------------------------------------------
 
+def _is_intraknot_source_project(cwd: Path) -> bool:
+    """Return True if *cwd* is the IntraKnot source repository.
+
+    Detected by the presence of a `pyproject.toml` at *cwd* whose
+    `[project]` table has `name = "intraknot"`.
+    """
+    toml_path = cwd / "pyproject.toml"
+    if not toml_path.exists():
+        return False
+    try:
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+        return data.get("project", {}).get("name") == "intraknot"
+    except Exception:
+        return False
+
+
 def _load_machine(machine_opt: Optional[str]) -> MachineConfig:
     configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
     return load_machine_config(configs_dir)
@@ -139,16 +156,24 @@ def main() -> None:
 def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     """Initialise the IntraKnot project skeleton.
 
-    Creates configs/, campaigns/, runs/, and notebooks/ with .gitignore
-    files that exclude all contents from git. Writes template
+    Creates configs/, campaigns/, runs/, and notebooks/. Writes template
     configs/slurm.toml, configs/paths.toml, and configs/machines.yaml.
     Appends .iknot_state to the root .gitignore.
+
+    When run inside the IntraKnot source repository itself, each created
+    directory also receives a .gitignore that excludes all its contents from
+    git. This guard is intentionally omitted in user projects so that
+    IntraKnot does not silently impose git-ignore rules on them.
     """
     cwd = Path.cwd()
+    in_dev = _is_intraknot_source_project(cwd)
 
     # configs/
     configs_dir = cwd / "configs"
-    write_data_gitignore(configs_dir)
+    if in_dev:
+        write_data_gitignore(configs_dir)
+    else:
+        configs_dir.mkdir(parents=True, exist_ok=True)
     slurm_path = configs_dir / "slurm.toml"
     paths_path = configs_dir / "paths.toml"
     machines_path = configs_dir / "machines.yaml"
@@ -165,8 +190,12 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     # Data directories.
     for rel in (campaigns_root, runs_root, notebooks_root):
         d = cwd / rel
-        write_data_gitignore(d)
-        click.echo(f"  created {rel}/ with .gitignore")
+        if in_dev:
+            write_data_gitignore(d)
+            click.echo(f"  created {rel}/ with .gitignore")
+        else:
+            d.mkdir(parents=True, exist_ok=True)
+            click.echo(f"  created {rel}/")
 
     # Root .gitignore — append .iknot_state if not already present.
     root_gitignore = cwd / ".gitignore"
