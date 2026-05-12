@@ -204,7 +204,7 @@ Creates `configs/`, `campaigns/`, `runs/`, and `notebooks/`, and writes template
 Activate a campaign so that subsequent `run create` commands are automatically associated with it:
 
 ```bash
-iknot campaign create --id heisenberg_dmrg_chi_scan \
+iknot campaign create heisenberg_dmrg_chi_scan \
     --description "DMRG chi scan for Heisenberg chain" \
     --algorithm dmrg
 
@@ -221,10 +221,16 @@ The active campaign is read from the `INTRAKNOT_CAMPAIGN` environment variable (
 
 ```bash
 # With an active campaign, --campaign is inferred automatically
-iknot run create --id heis_L64_chi128_g1.0 --config my_model.toml
+iknot run create heis_L64_chi128_g1.0 --config my_model.toml
 
-iknot run submit --id heis_L64_chi128_g1.0
+# Run directly on the current machine (no Slurm required)
+iknot run start heis_L64_chi128_g1.0
+
+# Submit to Slurm
+iknot run submit heis_L64_chi128_g1.0
 ```
+
+`iknot run start` reads `paths.python` from `configs/machines.yaml` to determine how to invoke the runner (e.g. `uv run`). Pass `--python <cmd>` to override, or omit the machine config entirely — it falls back to `python` when no config is present.
 
 ### Collect results and retry failures
 
@@ -237,7 +243,7 @@ iknot resume campaign --id heisenberg_dmrg_chi_scan
 ### Inspect a single run
 
 ```bash
-iknot status --id heis_L64_chi128_g1.0
+iknot status heis_L64_chi128_g1.0
 ```
 
 ## Installation
