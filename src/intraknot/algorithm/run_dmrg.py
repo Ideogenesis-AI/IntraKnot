@@ -59,8 +59,11 @@ sweep count stays consistent with the original target.
 
 Outputs (written to `main/attempts/attempt_NN/`)
 ------------------------------------------------
-log.txt
-    Alice logging output from this attempt.
+alice.log
+    Alice logging output from this attempt (DEBUG and above, timestamped).
+iknot.log
+    Combined log: IntraKnot bookkeeping messages plus Alice output (via
+    log propagation to the root logger).
 dmrg.ckpt
     PyTorch checkpoint written by Alice after every sweep (atomic rename from
     `dmrg_lock.ckpt`). Loadable via `dmrg.Summary.load`.
@@ -432,11 +435,17 @@ def run(run_dir: Path) -> None:
     attempt_dir.mkdir(parents=True, exist_ok=True)
     _update_current(run_dir, attempt_name)
 
-    # Configure logging to both the attempt log file and stderr.
-    alice.configure_logging(log_dir=attempt_dir)
-    log_file = attempt_dir / "log.txt"
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
+    # Configure Alice's own logger: stream (INFO+) and alice.log (DEBUG+).
+    alice.configure_logging(log_file=str(attempt_dir / "alice.log"))
+    # Attach a second file handler to the root logger so that all records
+    # (IntraKnot's own + Alice's via propagation) also land in iknot.log.
+    iknot_log = attempt_dir / "iknot.log"
+    file_handler = logging.FileHandler(iknot_log)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s [%(levelname)-5s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
     logging.getLogger().addHandler(file_handler)
 
     logger.info("IntraKnot DMRG runner")
