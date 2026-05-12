@@ -308,11 +308,8 @@ def create_campaign(
     (campaign_dir / "defaults.toml").write_text(
         "# Campaign-level default settings.\n"
         "# Values here are inherited by all runs and can be overridden per-run.\n\n"
-        "# [model] — add the [model.geometry] and [model.model] sections here\n"
-        "# when all runs in this campaign share the same physical model.\n"
-        "# Per-run overrides can still be supplied via `iknot run create --config`.\n\n"
         "[algorithm]\n"
-        "name         = \"dmrg\"\n"
+        "engine       = \"dmrg\"\n"
         "scheme       = \"2s\"\n"
         "max_bond     = 64\n"
         "n_sweeps     = 20\n"
