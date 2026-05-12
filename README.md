@@ -117,8 +117,9 @@ runs/heis_L64_chi128_g1.0/
 │   ├── status.json
 │   ├── attempts/
 │   │   └── attempt_01/
-│   │       ├── log.txt
-│   │       ├── checkpoint.ckpt  # periodic checkpoint (torch.save)
+│   │       ├── alice.log        # Alice logging output (DEBUG+, timestamped)
+│   │       ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
+│   │       ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
 │   │       ├── state.ckpt       # final MPS state (torch.save)
 │   │       ├── observables.json
 │   │       ├── convergence.csv
