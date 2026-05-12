@@ -224,7 +224,7 @@ def _update_current(run_dir: Path, attempt_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def _load_space_from_cfg(cfg_model: Dict[str, Any]) -> Tuple[Any, Dict]:
-    """Call `load_space` with the parameters implied by `cfg_model["model"]`.
+    """Call `load_space` with the parameters implied by the model config.
 
     `build_interaction` returns `(interactions, Spc, geo)` but does not expose
     the operator dict `Op` needed by `alice.init_mps`. This helper derives
@@ -237,8 +237,8 @@ def _load_space_from_cfg(cfg_model: Dict[str, Any]) -> Tuple[Any, Dict]:
     Parameters
     ----------
     cfg_model:
-        The `config["model"]` sub-dict (must contain at least
-        `model.model.category` and `model.model.symmetry`).
+        Alice-compatible model config dict with `"geometry"` and `"model"`
+        sub-keys (i.e. the dict passed directly to `build_interaction`).
 
     Returns
     -------
@@ -294,7 +294,8 @@ def _init_mps(
     Parameters
     ----------
     cfg_model:
-        `config["model"]` dict (Alice-compatible).
+        Alice-compatible model config dict (`{"geometry": ..., "model": ...}`),
+        used to initialise the physical Hilbert space.
     cfg_algo:
         `config["algorithm"]` dict.
     L:
@@ -426,7 +427,10 @@ def run(run_dir: Path) -> None:
     with open(config_path, "rb") as f:
         cfg = tomllib.load(f)
 
-    cfg_model = cfg.get("model", {})
+    cfg_model = {
+        "geometry": cfg.get("geometry", {}),
+        "model":    cfg.get("model", {}),
+    }
     cfg_algo = cfg.get("algorithm", {})
     cfg_output = cfg.get("output", {})
 
