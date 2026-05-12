@@ -131,8 +131,7 @@ class TestRunStart:
         with patch("intraknot.launch.subprocess.run") as mock_run:
             result = runner.invoke(
                 main,
-                ["run", "start",
-                 "--id", "my_run",
+                ["run", "start", "my_run",
                  "--runs-root", str(tmp_path / "runs"),
                  "--python", "python"],
             )
@@ -145,8 +144,7 @@ class TestRunStart:
         with patch("intraknot.launch.subprocess.run") as mock_run:
             runner.invoke(
                 main,
-                ["run", "start",
-                 "--id", "my_run",
+                ["run", "start", "my_run",
                  "--runs-root", str(tmp_path / "runs"),
                  "--python", "uv run"],
             )
@@ -157,8 +155,7 @@ class TestRunStart:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["run", "start",
-             "--id", "nonexistent",
+            ["run", "start", "nonexistent",
              "--runs-root", str(tmp_path / "runs"),
              "--python", "python"],
         )
@@ -174,8 +171,7 @@ class TestRunStart:
         ):
             result = runner.invoke(
                 main,
-                ["run", "start",
-                 "--id", "my_run",
+                ["run", "start", "my_run",
                  "--runs-root", str(tmp_path / "runs"),
                  "--python", "python"],
             )
