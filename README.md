@@ -84,7 +84,7 @@ A campaign records which runs belong together and why. Each campaign also carrie
 ```
 campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: id, description, algorithm, created_at
-├── defaults.toml       # TOML: default [model], [algorithm], and [output] for all runs
+├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
 ├── runs.csv            # CSV: parameter table and per-run status
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
@@ -92,7 +92,7 @@ campaigns/heisenberg_dmrg_chi_scan/
     └── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
 ```
 
-`defaults.toml` can carry a `[model]` section in addition to `[algorithm]` and `[output]`. When all runs in a campaign share the same physical model (lattice, Hamiltonian, symmetry), putting `[model]` there means `iknot run create` needs no `--config` argument at all. The `[model]` section is intentionally absent from the generated template — it is specific to each campaign's scientific topic and must be filled in by hand.
+`defaults.toml` is generated with `[algorithm]` and `[output]` sections. You can also add `[geometry]` and `[model]` sections by hand when all runs in a campaign share the same physical model — `iknot run create` will then need no `--config` argument at all.
 
 `runs.csv` maps array indices to run directories and tracks status:
 
@@ -136,16 +136,16 @@ runs/heis_L64_chi128_g1.0/
 
 ### Run scientific config (`config.toml`)
 
-Run configs follow Alice's TOML format. IntraKnot adds `[algorithm]` and `[output]` sections alongside Alice's `[model.geometry]` / `[model.model]` structure. The `[model]` section is passed directly to `alice.build_interaction()`.
+Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding `[algorithm]` and `[output]` sections. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
 
 ```toml
-[model.geometry]
+[geometry]
 lattice = "chain"
 lx      = 64
 bcx     = "OBC"
 n2x     = true
 
-[model.model]
+[model]
 category = "bosonic"
 label    = "Heisenberg"
 symmetry = "U1"
@@ -153,13 +153,13 @@ spin     = 0.5
 J        = 1.0
 
 [algorithm]
-name         = "dmrg"
+engine       = "dmrg"
 scheme       = "2s"
 max_bond     = 128
 n_sweeps     = 20
 e_tol        = 1.0e-8
 trunc_thresh = 1.0e-15
-init         = "random"
+init         = "product"
 
 [output]
 save_state      = true
@@ -167,7 +167,7 @@ save_checkpoint = true
 observables     = ["energy", "entropy"]
 ```
 
-When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[algorithm]` and `[output]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
+When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[geometry]`, `[model]`, `[algorithm]`, and `[output]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
 
 ### Status model
 
