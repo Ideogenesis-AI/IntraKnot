@@ -359,15 +359,19 @@ _SLURM_TOML_TEMPLATE = """\
 # This file is the master template. It is copied verbatim to each campaign
 # on creation, and from there to each run. Edit the campaign copy for
 # campaign-wide defaults; edit the run copy for per-run overrides.
+#
+# Fields marked "_init_" must be set before submitting any job.
+# Optional fields (mail_type, mail_user) can be left as "" to omit the
+# corresponding #SBATCH directive entirely.
 
 [basic]
-account   = ""          # Slurm account / project code
+account   = "_init_"    # Slurm account / project code
 mail_type = ""          # --mail-type (e.g. "ALL", "END,FAIL"); leave "" to omit
 mail_user = ""          # email address for notifications; leave "" to omit
 
 [main]
-partition     = ""          # target partition (queue)
-constraint    = ""          # node constraint (-C); leave "" to omit
+partition     = "_init_"    # target partition (queue)
+constraint    = "_init_"    # node constraint (-C); set "" to omit
 time          = "04:00:00"  # walltime (HH:MM:SS)
 mem           = "16000"     # memory per node (MB integer or e.g. "16G")
 ntasks        = 1           # --ntasks (1 for threaded jobs)
@@ -375,8 +379,8 @@ nodes         = 1           # --nodes
 cpus_per_task = 8           # number of CPU threads
 
 [exec]
-partition     = ""          # can differ from [main] for lighter follow-up jobs
-constraint    = ""
+partition     = "_init_"    # can differ from [main] for lighter follow-up jobs
+constraint    = "_init_"    # set "" to omit
 time          = "01:00:00"
 mem           = "8000"
 ntasks        = 1
