@@ -234,7 +234,7 @@ iknot run start heis_L64_chi128_g1.0
 iknot run submit heis_L64_chi128_g1.0
 ```
 
-`iknot run start` reads `paths.python` from `configs/machines.yaml` to determine how to invoke the runner (e.g. `uv run`). Pass `--python <cmd>` to override, or omit the machine config entirely — it falls back to `python` when no config is present.
+`iknot run start` writes the same Slurm script as `submit`, then executes it locally with `sh`. `SLURM_JOB_ID` and `SLURM_NODELIST` are stubbed automatically so the script runs without a Slurm daemon. This is useful on workstations or for interactive testing where Slurm is not available.
 
 ### Collect results and retry failures
 
