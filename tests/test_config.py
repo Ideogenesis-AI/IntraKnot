@@ -18,18 +18,19 @@
 
 """Tests for src/intraknot/config.py."""
 
-import textwrap
-
 import pytest
 
 from intraknot.config import (
     MachineConfig,
     PathsConfig,
-    SlurmConfig,
+    SlurmBasicConfig,
+    SlurmJobConfig,
+    SlurmTomlConfig,
     _merge_defaults,
     load_campaign_defaults,
     load_config,
     load_machine_config,
+    load_slurm_toml,
     write_data_gitignore,
     write_machines_yaml,
     write_paths_toml,
@@ -74,25 +75,61 @@ class TestLoadConfig:
 
 
 # ---------------------------------------------------------------------------
+# load_slurm_toml
+# ---------------------------------------------------------------------------
+
+class TestLoadSlurmToml:
+    def test_returns_defaults_for_missing_file(self, tmp_path):
+        cfg = load_slurm_toml(tmp_path / "nonexistent.toml")
+        assert isinstance(cfg, SlurmTomlConfig)
+        assert cfg.basic.account == ""
+        assert cfg.main.cpus_per_task == 8
+        assert cfg.exec_.time == "04:00:00"
+
+    def test_reads_all_sections(self, tmp_path):
+        p = tmp_path / "slurm.toml"
+        p.write_text(
+            '[basic]\naccount = "proj"\nmail_type = "ALL"\nmail_user = "x@y.com"\n'
+            '[main]\npartition = "cluster"\nconstraint = "fast"\n'
+            'time = "24:00:00"\nmem = "300000"\nntasks = 1\nnodes = 1\n'
+            'cpus_per_task = 64\n'
+            '[exec]\npartition = "short"\ntime = "01:00:00"\nmem = "8000"\n'
+            'ntasks = 1\nnodes = 1\ncpus_per_task = 4\n'
+        )
+        cfg = load_slurm_toml(p)
+        assert cfg.basic.account == "proj"
+        assert cfg.basic.mail_type == "ALL"
+        assert cfg.basic.mail_user == "x@y.com"
+        assert cfg.main.partition == "cluster"
+        assert cfg.main.constraint == "fast"
+        assert cfg.main.time == "24:00:00"
+        assert cfg.main.mem == "300000"
+        assert cfg.main.cpus_per_task == 64
+        assert cfg.exec_.partition == "short"
+        assert cfg.exec_.time == "01:00:00"
+        assert cfg.exec_.cpus_per_task == 4
+
+    def test_partial_section_uses_defaults(self, tmp_path):
+        p = tmp_path / "slurm.toml"
+        p.write_text('[main]\ntime = "48:00:00"\n')
+        cfg = load_slurm_toml(p)
+        assert cfg.main.time == "48:00:00"
+        assert cfg.main.cpus_per_task == 8  # dataclass default
+        assert cfg.exec_.time == "04:00:00"  # exec section absent, uses default
+
+    def test_mem_coerced_to_str(self, tmp_path):
+        p = tmp_path / "slurm.toml"
+        p.write_text('[main]\nmem = 300000\n')
+        cfg = load_slurm_toml(p)
+        assert cfg.main.mem == "300000"
+        assert isinstance(cfg.main.mem, str)
+
+
+# ---------------------------------------------------------------------------
 # load_machine_config
 # ---------------------------------------------------------------------------
 
 class TestLoadMachineConfig:
-    def _write_slurm(self, d, **kwargs):
-        defaults = dict(
-            account="myproject",
-            partition="standard",
-            default_time="08:00:00",
-            default_mem="32G",
-            default_cpus_per_task=16,
-        )
-        defaults.update(kwargs)
-        (d / "slurm.toml").write_text(
-            "[slurm]\n"
-            + "\n".join(f'{k} = "{v}"' if isinstance(v, str) else f"{k} = {v}"
-                        for k, v in defaults.items())
-        )
-
     def _write_paths(self, d, **kwargs):
         defaults = dict(
             run_root="/scratch/runs",
@@ -106,27 +143,20 @@ class TestLoadMachineConfig:
             + "\n".join(f'{k} = "{v}"' for k, v in defaults.items())
         )
 
-    def test_reads_slurm_and_paths(self, tmp_path):
-        self._write_slurm(tmp_path)
+    def test_reads_paths(self, tmp_path):
         self._write_paths(tmp_path)
         mc = load_machine_config(tmp_path)
-        assert mc.slurm.account == "myproject"
-        assert mc.slurm.partition == "standard"
-        assert mc.slurm.default_cpus_per_task == 16
         assert mc.paths.run_root == "/scratch/runs"
         assert mc.paths.python == "uv run"
 
     def test_missing_files_give_defaults(self, tmp_path):
         mc = load_machine_config(tmp_path)
         assert isinstance(mc, MachineConfig)
-        assert mc.slurm.partition == ""
         assert mc.paths.python == "uv run"
 
-    def test_partial_slurm_uses_defaults_for_missing_keys(self, tmp_path):
-        (tmp_path / "slurm.toml").write_text('[slurm]\naccount = "proj"\n')
+    def test_no_slurm_field_on_machine_config(self, tmp_path):
         mc = load_machine_config(tmp_path)
-        assert mc.slurm.account == "proj"
-        assert mc.slurm.default_time == "04:00:00"  # default
+        assert not hasattr(mc, "slurm")
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +182,22 @@ class TestLoadCampaignDefaults:
 # ---------------------------------------------------------------------------
 
 class TestTemplateGenerators:
-    def test_write_slurm_toml(self, tmp_path):
+    def test_write_slurm_toml_has_three_sections(self, tmp_path):
         p = tmp_path / "slurm.toml"
         write_slurm_toml(p)
         assert p.exists()
         text = p.read_text()
-        assert "[slurm]" in text
+        assert "[basic]" in text
+        assert "[main]" in text
+        assert "[exec]" in text
         assert "account" in text
+        assert "cpus_per_task" in text
+
+    def test_write_slurm_toml_is_loadable(self, tmp_path):
+        p = tmp_path / "slurm.toml"
+        write_slurm_toml(p)
+        cfg = load_slurm_toml(p)
+        assert isinstance(cfg, SlurmTomlConfig)
 
     def test_write_paths_toml(self, tmp_path):
         p = tmp_path / "paths.toml"
