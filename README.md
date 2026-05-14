@@ -116,7 +116,7 @@ campaigns/heisenberg_dmrg_chi_scan/
     └── <any>.py        # custom exec scripts placed here are auto-discovered
 ```
 
-`defaults.toml` is generated with `[algorithm]` and `[output]` sections. You can also add `[geometry]` and `[model]` sections by hand when all runs in a campaign share the same physical model — `iknot run create` will then need no `--config` argument at all.
+`defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
 `runs.csv` maps array indices to run directories and tracks status:
 
