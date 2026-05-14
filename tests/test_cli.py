@@ -136,7 +136,7 @@ class TestRunStart:
             paths=PathsConfig(python="python"),
         )
 
-    def test_invokes_bash_with_slurm_script(self, tmp_path):
+    def test_invokes_slurm_script_directly(self, tmp_path):
         self._make_run_dir(tmp_path)
         runner = CliRunner()
         with patch("intraknot.cli._load_machine", return_value=self._machine()), \
@@ -148,7 +148,7 @@ class TestRunStart:
             )
         assert result.exit_code == 0, result.output
         cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "bash"
+        assert cmd[0] == "sh"
         assert "submit.slurm" in cmd[1]
 
     def test_slurm_env_vars_stubbed(self, tmp_path):
