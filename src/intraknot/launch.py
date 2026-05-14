@@ -527,19 +527,30 @@ def create_campaign(
         yaml.dump(campaign_meta, default_flow_style=False, sort_keys=False)
     )
 
-    # defaults.toml — template for algorithm + output defaults.
+    # defaults.toml — template for geometry, model, algorithm, and output defaults.
     (campaign_dir / "defaults.toml").write_text(
         "# Campaign-level default settings.\n"
         "# Values here are inherited by all runs and can be overridden per-run.\n\n"
+        "[geometry]\n"
+        "lattice = \"_init_\"\n"
+        "lx      = 0\n"
+        "bcx     = \"OBC\"\n"
+        "n2x     = true\n\n"
+        "[model]\n"
+        "category = \"_init_\"  # 'bosonic', 'fermionic', or 'conductor'\n"
+        "label    = \"_init_\"\n"
+        "symmetry = \"_init_\"\n\n"
         "[algorithm]\n"
         "engine       = \"dmrg\"\n"
-        "scheme       = \"2s\"\n"
+        "scheme       = \"1sp\"   # '2s' or '1sp'\n"
         "max_bond     = 64\n"
         "n_sweeps     = 20\n"
         "e_tol        = 1.0e-8\n"
         "trunc_thresh = 1.0e-15\n"
-        "init         = \"product\"  # 'product', 'random', or 'resume'\n"
-        "seed         = 42\n\n"
+        "init         = \"random\"   # 'product', 'random', or 'resume'\n"
+        "seed         = 42\n"
+        "expand_k     = 8\n"
+        "expand_alpha = 16\n\n"
         "[output]\n"
         "save_state      = true\n"
         "observables     = [\"energy\", \"entropy\"]\n"
