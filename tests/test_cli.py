@@ -142,17 +142,19 @@ class TestRunStart:
         run_dir.mkdir(parents=True)
         (run_dir / "algorithm").mkdir()
         (run_dir / "algorithm" / "run_dmrg.py").write_text("# dummy\n")
+        # Provide a minimal slurm.toml so write_slurm_script can render the script.
+        (run_dir / "slurm.toml").write_text(
+            '[basic]\naccount = "acc"\n'
+            '[main]\npartition = "cpu"\ntime = "01:00:00"\nmem = "4000"\n'
+            'ntasks = 1\nnodes = 1\ncpus_per_task = 1\n'
+            '[exec]\ntime = "00:30:00"\nmem = "2000"\nntasks = 1\n'
+            'nodes = 1\ncpus_per_task = 1\n'
+        )
         return run_dir
 
     def _machine(self):
-        from intraknot.config import MachineConfig, PathsConfig, SlurmConfig
-        return MachineConfig(
-            slurm=SlurmConfig(
-                account="acc", partition="cpu", default_time="01:00:00",
-                default_mem="4G", default_cpus_per_task=1,
-            ),
-            paths=PathsConfig(python="python"),
-        )
+        from intraknot.config import MachineConfig, PathsConfig
+        return MachineConfig(paths=PathsConfig(python="python"))
 
     def test_invokes_slurm_script_directly(self, tmp_path):
         self._make_run_dir(tmp_path)
