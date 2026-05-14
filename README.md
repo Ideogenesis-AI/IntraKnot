@@ -58,7 +58,7 @@ configs/
 
 `configs/slurm.toml` is the **master Slurm template**. It is copied verbatim to each campaign when `iknot campaign create` is run, and from there to each run when `iknot run create` is run. Users edit the campaign copy for campaign-wide settings (e.g. walltime for a given bond dimension), or the run copy for a single-run override. No merging happens — the copy in the run directory is what gets submitted.
 
-Example `slurm.toml`:
+Example `slurm.toml` (after editing the campaign copy):
 
 ```toml
 [basic]
@@ -68,7 +68,7 @@ mail_user = "user@lmu.de"   # --mail-user; leave "" to omit
 
 [main]
 partition     = "cluster"
-constraint    = "x86-64-v4&fast-io&ht"  # -C; leave "" to omit
+constraint    = "x86-64-v4&fast-io&ht"  # -C; set "" to omit
 time          = "504:00:00"
 mem           = "300000"                 # passed verbatim to --mem (MB or "300G")
 ntasks        = 1
@@ -84,6 +84,8 @@ ntasks        = 1
 nodes         = 1
 cpus_per_task = 8
 ```
+
+Fields marked `"_init_"` in the template (`account`, `partition`, `constraint`) have no meaningful default and must be edited before submitting any job. Optional fields (`mail_type`, `mail_user`) can be left as `""` to suppress the corresponding `#SBATCH` directive entirely.
 
 `[basic]` carries fields shared by every job in the run (account, mail). `[main]` controls resources for the primary job; `[exec]` controls resources for all exec follow-up jobs. Optional fields (`constraint`, `mail_type`, `mail_user`) are only emitted as `#SBATCH` directives when non-empty.
 
