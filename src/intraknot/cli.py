@@ -374,7 +374,7 @@ def run_start(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
         env = os.environ.copy()
         env.setdefault("SLURM_JOB_ID", "local")
         env.setdefault("SLURM_NODELIST", "localhost")
-        subprocess.run(["bash", str(script)], check=True, env=env)
+        subprocess.run(["sh", str(script)], check=True, env=env)
     except subprocess.CalledProcessError as e:
         click.echo(f"Script exited with status {e.returncode}.", err=True)
         sys.exit(e.returncode)
