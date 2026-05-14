@@ -690,7 +690,121 @@ def create_run(
         runner = _algorithm_source_path(algorithm)
     _copy_algorithm(runner, run_dir)
 
+    # Register the run in the campaign's runs.csv.
+    _register_run_in_campaign(campaign_dir, run_id)
+
     return run_dir
+
+
+# ---------------------------------------------------------------------------
+# Campaign run registry helpers
+# ---------------------------------------------------------------------------
+
+def _register_run_in_campaign(campaign_dir: Path, run_id: str) -> None:
+    """Append a `run_id,pending` row to the campaign's `runs.csv`.
+
+    Creates the file with a header row if it does not yet exist.
+
+    Parameters
+    ----------
+    campaign_dir:
+        Campaign directory containing (or to receive) `runs.csv`.
+    run_id:
+        Run identifier to register.
+    """
+    runs_csv = campaign_dir / "runs.csv"
+    if not runs_csv.exists():
+        with open(runs_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "status"])
+    with open(runs_csv, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([run_id, "pending"])
+
+
+def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
+    """Remove a run from the campaign's `runs.csv`.
+
+    Rewrites `runs.csv` without the row for `run_id`. Does nothing if
+    the file does not exist or `run_id` is not present.
+
+    Parameters
+    ----------
+    campaign_dir:
+        Campaign directory containing `runs.csv`.
+    run_id:
+        Run identifier to remove.
+
+    Returns
+    -------
+    bool
+        `True` if a row was removed, `False` if `run_id` was not found.
+    """
+    runs_csv = campaign_dir / "runs.csv"
+    if not runs_csv.exists():
+        return False
+
+    with open(runs_csv, newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = list(reader.fieldnames or ["run_id", "status"])
+        rows = list(reader)
+
+    kept = [r for r in rows if r.get("run_id", "").strip() != run_id]
+    if len(kept) == len(rows):
+        return False
+
+    with open(runs_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    return True
+
+
+def delete_run(
+    run_dir: Path,
+    campaign_dir: Optional[Path] = None,
+    *,
+    delete_dir: bool = False,
+) -> bool:
+    """Deregister a run from its campaign and optionally delete the directory.
+
+    Removes the run's row from `campaigns/<id>/runs.csv`. When `delete_dir`
+    is `True`, the entire run directory tree is also removed from disk.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    campaign_dir:
+        Campaign directory whose `runs.csv` to update. Pass `None` to skip
+        the CSV update (e.g. when the campaign is not known).
+    delete_dir:
+        If `True`, delete `run_dir` from disk after deregistering.
+
+    Returns
+    -------
+    bool
+        `True` if the run was found and removed from `runs.csv`, or if no
+        campaign directory was supplied. `False` when a campaign directory was
+        supplied but `run_id` was absent from `runs.csv`.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `run_dir` does not exist.
+    """
+    if not run_dir.exists():
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+    run_id = run_dir.name
+    removed = True
+    if campaign_dir is not None and campaign_dir.exists():
+        removed = remove_run_from_campaign(campaign_dir, run_id)
+
+    if delete_dir:
+        shutil.rmtree(run_dir)
+
+    return removed
 
 
 # ---------------------------------------------------------------------------
