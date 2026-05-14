@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
+import yaml
 
 from .collect import collect_campaign, collect_run
 from .config import (
@@ -58,7 +59,10 @@ from .launch import (
     create_attempt,
     create_campaign,
     create_run,
+    prepare_exec,
+    submit_exec_job,
     submit_job,
+    write_exec_slurm_script,
     write_slurm_script,
 )
 from .resume import find_resumable_runs, is_resumable, resume_campaign, resume_run
@@ -131,6 +135,31 @@ def _is_intraknot_source_project(cwd: Path) -> bool:
 def _load_machine(machine_opt: Optional[str]) -> MachineConfig:
     configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
     return load_machine_config(configs_dir)
+
+
+def _resolve_campaign_dir(
+    run_dir: Path,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+) -> Optional[Path]:
+    """Resolve the campaign directory for a run.
+
+    Reads from `manifest.yaml` when `campaign_id` is not explicitly given,
+    falling back to the active campaign. Returns `None` if unresolvable.
+    """
+    if campaign_id is None:
+        manifest = run_dir / "manifest.yaml"
+        if manifest.exists():
+            try:
+                data = yaml.safe_load(manifest.read_text()) or {}
+                campaign_id = data.get("campaign")
+            except Exception:
+                pass
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        return None
+    return Path(campaigns_root) / campaign_id
 
 
 # ---------------------------------------------------------------------------
@@ -228,16 +257,22 @@ def grp_campaign() -> None:
               help="Algorithm runner to copy into the campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True,
               help="Parent directory for campaign subdirectories.")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
 def campaign_create(
     campaign_id: str,
     description: str,
     algorithm: str,
     campaigns_root: str,
+    machine_opt: Optional[str],
 ) -> None:
     """Create a new campaign directory."""
     root = Path(campaigns_root)
+    configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
     try:
-        campaign_dir = create_campaign(campaign_id, description, algorithm, root)
+        campaign_dir = create_campaign(
+            campaign_id, description, algorithm, root, configs_dir=configs_dir
+        )
         click.echo(f"Created campaign: {campaign_dir}")
     except FileExistsError as e:
         click.echo(f"Error: {e}", err=True)
@@ -404,6 +439,97 @@ def run_submit(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
         sys.exit(1)
 
 
+@grp_run.command("exec")
+@click.argument("script_name")
+@click.argument("run_id", required=False, default=None)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Resolved from manifest.yaml or active campaign "
+                   "when omitted.")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+@click.option("--local", is_flag=True, default=False,
+              help="Run directly with bash instead of submitting to Slurm.")
+@click.option("--attempt", default=None,
+              help="Pin the exec script to a specific attempt "
+                   "(e.g. attempt_01). Passed as --attempt to the script.")
+def run_exec(
+    script_name: str,
+    run_id: Optional[str],
+    runs_root: str,
+    campaigns_root: str,
+    campaign_id: Optional[str],
+    machine_opt: Optional[str],
+    local: bool,
+    attempt: Optional[str],
+) -> None:
+    """Run an exec (follow-up) script in the context of a run.
+
+    SCRIPT_NAME is the filename without the .py extension
+    (e.g. `compute_sf`, `entanglement`). The script is located by searching:
+
+    \b
+    1. <run_dir>/algorithm/<script_name>.py
+    2. <campaign_dir>/algorithm/<script_name>.py
+    3. The intraknot package
+
+    A Slurm script is written to exec/<script_name>/submit.slurm using the
+    [exec] section of the run's slurm.toml, then submitted via sbatch (or
+    run directly with --local).
+    """
+    machine = _load_machine(machine_opt)
+
+    # Resolve run directory.
+    if run_id is None:
+        click.echo("Error: RUN_ID is required.", err=True)
+        sys.exit(1)
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+        sys.exit(1)
+
+    # Resolve campaign directory.
+    campaign_dir = _resolve_campaign_dir(run_dir, campaign_id, campaigns_root)
+    if campaign_dir is None:
+        click.echo(
+            "Error: could not determine campaign. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    try:
+        slot = prepare_exec(run_dir, script_name, campaign_dir)
+        script = write_exec_slurm_script(run_dir, script_name, machine)
+        click.echo(f"Wrote exec Slurm script: {script}")
+
+        if local:
+            click.echo(f"Running exec job locally: {script_name}")
+            env = os.environ.copy()
+            env.setdefault("SLURM_JOB_ID", "local")
+            env.setdefault("SLURM_NODELIST", "localhost")
+            cmd = ["sh", str(script)]
+            if attempt:
+                # Append --attempt to the shell invocation via env var so the
+                # script can pick it up; alternatively, scripts read it from
+                # IKNOT_ATTEMPT.
+                env["IKNOT_ATTEMPT"] = attempt
+            subprocess.run(cmd, check=True, env=env)
+        else:
+            job_id = submit_exec_job(run_dir, script_name)
+            click.echo(f"Submitted exec job '{script_name}': {job_id}")
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"Script exited with status {e.returncode}.", err=True)
+        sys.exit(e.returncode)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # iknot collect
 # ---------------------------------------------------------------------------
@@ -524,7 +650,7 @@ def resume_campaign_cmd(
 @click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 def cmd_status(run_id: str, runs_root: str) -> None:
-    """Print the status of a run."""
+    """Print the status of a run, including any exec jobs."""
     run_dir = Path(runs_root) / run_id
     status_path = run_dir / "main" / "status.json"
     if not status_path.exists():
@@ -557,5 +683,23 @@ def cmd_status(run_id: str, runs_root: str) -> None:
                     click.echo(f"Converged       : {converged}")
             except (json.JSONDecodeError, OSError):
                 pass
+
+        # Summarise exec jobs if exec/ directory exists.
+        exec_dir = run_dir / "exec"
+        if exec_dir.is_dir():
+            slots = sorted(p.name for p in exec_dir.iterdir() if p.is_dir())
+            if slots:
+                click.echo("\nExec jobs:")
+                for slot_name in slots:
+                    slot_status_path = exec_dir / slot_name / "status.json"
+                    if slot_status_path.exists():
+                        try:
+                            slot_data = json.loads(slot_status_path.read_text())
+                            state_val = slot_data.get("state", "unknown")
+                        except (json.JSONDecodeError, OSError):
+                            state_val = "unreadable"
+                    else:
+                        state_val = "pending"
+                    click.echo(f"  {slot_name:<30} {state_val}")
     else:
         click.echo(json.dumps(s.to_dict(), indent=2))
