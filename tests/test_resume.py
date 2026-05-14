@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 import pytest
 
-from intraknot.config import MachineConfig, PathsConfig, SlurmConfig
+from intraknot.config import MachineConfig, PathsConfig
 from intraknot.resume import find_resumable_runs, is_resumable, resume_campaign, resume_run
 from intraknot.status import (
     AttemptStatus,
@@ -36,10 +36,7 @@ from intraknot.status import (
 
 
 def _make_machine() -> MachineConfig:
-    return MachineConfig(
-        slurm=SlurmConfig(account="proj", partition="cpu"),
-        paths=PathsConfig(python="uv run"),
-    )
+    return MachineConfig(paths=PathsConfig(python="uv run"))
 
 
 def _make_run_dir(
@@ -51,11 +48,18 @@ def _make_run_dir(
 ) -> Path:
     run_dir = tmp_path / run_id
     (run_dir / "main" / "attempts").mkdir(parents=True)
-    (run_dir / "submit").mkdir()
-    (run_dir / "logs").mkdir()
+    (run_dir / "main" / "logs").mkdir(parents=True)
     (run_dir / "algorithm").mkdir()
     # Place a stub runner so the Slurm script has something to reference.
     (run_dir / "algorithm" / "run_dmrg.py").write_text("# stub\n")
+    # Provide a minimal slurm.toml so write_slurm_script can render the script.
+    (run_dir / "slurm.toml").write_text(
+        '[basic]\naccount = "proj"\n'
+        '[main]\npartition = "cpu"\ntime = "01:00:00"\nmem = "4000"\n'
+        'ntasks = 1\nnodes = 1\ncpus_per_task = 1\n'
+        '[exec]\ntime = "00:30:00"\nmem = "2000"\nntasks = 1\n'
+        'nodes = 1\ncpus_per_task = 1\n'
+    )
     write_status(
         run_dir / "main" / "status.json",
         MainStatus(
