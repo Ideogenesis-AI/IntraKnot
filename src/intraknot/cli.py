@@ -59,7 +59,9 @@ from .launch import (
     create_attempt,
     create_campaign,
     create_run,
+    delete_run,
     prepare_exec,
+    remove_run_from_campaign,
     submit_exec_job,
     submit_job,
     write_exec_slurm_script,
@@ -528,6 +530,64 @@ def run_exec(
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+
+
+@grp_run.command("delete")
+@click.argument("run_id")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Resolved from manifest.yaml or active campaign when omitted.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--delete-dir", is_flag=True, default=False,
+              help="Also remove the run directory from disk.")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Skip the confirmation prompt when --delete-dir is given.")
+def run_delete(
+    run_id: str,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    delete_dir: bool,
+    yes: bool,
+) -> None:
+    """Remove a run from its campaign's runs.csv.
+
+    By default only deregisters the run from the campaign registry
+    (runs.csv); the run directory is left on disk. Pass --delete-dir to
+    also remove the directory. A confirmation prompt is shown unless --yes
+    is supplied.
+    """
+    run_dir = Path(runs_root) / run_id
+    if not run_dir.exists():
+        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+        sys.exit(1)
+
+    campaign_dir = _resolve_campaign_dir(run_dir, campaign_id, campaigns_root)
+
+    if delete_dir and not yes:
+        click.confirm(
+            f"Delete run directory '{run_dir}'? This cannot be undone.",
+            abort=True,
+        )
+
+    try:
+        found_in_csv = delete_run(run_dir, campaign_dir=campaign_dir, delete_dir=delete_dir)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if campaign_dir is not None:
+        if found_in_csv:
+            click.echo(f"Removed {run_id} from {campaign_dir.name}/runs.csv.")
+        else:
+            click.echo(f"Run {run_id} was not listed in {campaign_dir.name}/runs.csv.")
+    else:
+        click.echo("No campaign found; runs.csv not updated.")
+
+    if delete_dir:
+        click.echo(f"Deleted run directory: {run_dir}")
+    else:
+        click.echo(f"Run directory preserved: {run_dir}")
 
 
 # ---------------------------------------------------------------------------
