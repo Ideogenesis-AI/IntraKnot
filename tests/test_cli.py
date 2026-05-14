@@ -121,58 +121,70 @@ class TestCmdInit:
 class TestRunStart:
     def _make_run_dir(self, base: Path, run_id: str = "my_run") -> Path:
         run_dir = base / "runs" / run_id
-        (run_dir / "algorithm").mkdir(parents=True)
+        run_dir.mkdir(parents=True)
+        (run_dir / "algorithm").mkdir()
         (run_dir / "algorithm" / "run_dmrg.py").write_text("# dummy\n")
         return run_dir
 
-    def test_invokes_start_run(self, tmp_path):
-        run_dir = self._make_run_dir(tmp_path)
+    def _machine(self):
+        from intraknot.config import MachineConfig, PathsConfig, SlurmConfig
+        return MachineConfig(
+            slurm=SlurmConfig(
+                account="acc", partition="cpu", default_time="01:00:00",
+                default_mem="4G", default_cpus_per_task=1,
+            ),
+            paths=PathsConfig(python="python"),
+        )
+
+    def test_invokes_bash_with_slurm_script(self, tmp_path):
+        self._make_run_dir(tmp_path)
         runner = CliRunner()
-        with patch("intraknot.launch.subprocess.run") as mock_run:
+        with patch("intraknot.cli._load_machine", return_value=self._machine()), \
+             patch("intraknot.cli.subprocess.run") as mock_run:
             result = runner.invoke(
                 main,
                 ["run", "start", "my_run",
-                 "--runs-root", str(tmp_path / "runs"),
-                 "--python", "python"],
+                 "--runs-root", str(tmp_path / "runs")],
             )
         assert result.exit_code == 0, result.output
-        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "bash"
+        assert "submit.slurm" in cmd[1]
 
-    def test_explicit_python_flag_overrides_machine(self, tmp_path):
-        run_dir = self._make_run_dir(tmp_path)
+    def test_slurm_env_vars_stubbed(self, tmp_path):
+        self._make_run_dir(tmp_path)
         runner = CliRunner()
-        with patch("intraknot.launch.subprocess.run") as mock_run:
+        with patch("intraknot.cli._load_machine", return_value=self._machine()), \
+             patch("intraknot.cli.subprocess.run") as mock_run:
             runner.invoke(
                 main,
                 ["run", "start", "my_run",
-                 "--runs-root", str(tmp_path / "runs"),
-                 "--python", "uv run"],
+                 "--runs-root", str(tmp_path / "runs")],
             )
-        cmd = mock_run.call_args[0][0]
-        assert cmd[:2] == ["uv", "run"]
+        _, kwargs = mock_run.call_args
+        assert kwargs["env"]["SLURM_JOB_ID"] == "local"
+        assert kwargs["env"]["SLURM_NODELIST"] == "localhost"
 
     def test_missing_run_dir_exits_nonzero(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(
-            main,
-            ["run", "start", "nonexistent",
-             "--runs-root", str(tmp_path / "runs"),
-             "--python", "python"],
-        )
+        with patch("intraknot.cli._load_machine", return_value=self._machine()):
+            result = runner.invoke(
+                main,
+                ["run", "start", "nonexistent",
+                 "--runs-root", str(tmp_path / "runs")],
+            )
         assert result.exit_code != 0
 
     def test_runner_exit_code_propagated(self, tmp_path):
         import subprocess
         self._make_run_dir(tmp_path)
         runner = CliRunner()
-        with patch(
-            "intraknot.launch.subprocess.run",
-            side_effect=subprocess.CalledProcessError(2, "python"),
-        ):
+        with patch("intraknot.cli._load_machine", return_value=self._machine()), \
+             patch("intraknot.cli.subprocess.run",
+                   side_effect=subprocess.CalledProcessError(2, "bash")):
             result = runner.invoke(
                 main,
                 ["run", "start", "my_run",
-                 "--runs-root", str(tmp_path / "runs"),
-                 "--python", "python"],
+                 "--runs-root", str(tmp_path / "runs")],
             )
         assert result.exit_code == 2

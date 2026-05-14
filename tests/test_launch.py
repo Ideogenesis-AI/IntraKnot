@@ -12,7 +12,6 @@ from intraknot.launch import (
     _dump_toml,
     create_attempt,
     create_campaign,
-    start_run,
     update_current,
     write_slurm_script,
 )
@@ -170,63 +169,3 @@ class TestWriteSlurmScript:
         assert "testproject" in text
         assert "cpu" in text
         assert "02:00:00" in text
-
-
-# ---------------------------------------------------------------------------
-# start_run
-# ---------------------------------------------------------------------------
-
-class TestStartRun:
-    def _make_run_dir(self, tmp_path: Path) -> Path:
-        run_dir = tmp_path / "my_run"
-        alg_dir = run_dir / "algorithm"
-        alg_dir.mkdir(parents=True)
-        (alg_dir / "run_dmrg.py").write_text("# dummy runner\n")
-        return run_dir
-
-    def test_invokes_runner_with_correct_args(self, tmp_path):
-        run_dir = self._make_run_dir(tmp_path)
-        runner_path = run_dir / "algorithm" / "run_dmrg.py"
-
-        with patch("intraknot.launch.subprocess.run") as mock_run:
-            start_run(run_dir, "python")
-
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "python"
-        assert str(runner_path) in cmd
-        assert "--run-dir" in cmd
-        assert str(run_dir) in cmd
-
-    def test_multiword_python_cmd_is_split(self, tmp_path):
-        run_dir = self._make_run_dir(tmp_path)
-
-        with patch("intraknot.launch.subprocess.run") as mock_run:
-            start_run(run_dir, "uv run")
-
-        cmd = mock_run.call_args[0][0]
-        assert cmd[0] == "uv"
-        assert cmd[1] == "run"
-
-    def test_check_true_passed_to_subprocess(self, tmp_path):
-        run_dir = self._make_run_dir(tmp_path)
-
-        with patch("intraknot.launch.subprocess.run") as mock_run:
-            start_run(run_dir, "python")
-
-        _, kwargs = mock_run.call_args
-        assert kwargs.get("check") is True
-
-    def test_raises_when_algorithm_dir_empty(self, tmp_path):
-        run_dir = tmp_path / "my_run"
-        (run_dir / "algorithm").mkdir(parents=True)
-
-        with pytest.raises(FileNotFoundError, match="algorithm"):
-            start_run(run_dir, "python")
-
-    def test_raises_when_algorithm_dir_absent(self, tmp_path):
-        run_dir = tmp_path / "my_run"
-        run_dir.mkdir()
-
-        with pytest.raises(FileNotFoundError):
-            start_run(run_dir, "python")
