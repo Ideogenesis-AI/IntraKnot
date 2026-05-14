@@ -23,7 +23,6 @@ from __future__ import annotations
 import csv
 import datetime
 import importlib.resources
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -511,6 +510,7 @@ def write_slurm_script(
     if run_id is None:
         run_id = run_dir.name
 
+    run_dir = run_dir.resolve()
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -562,6 +562,8 @@ def write_array_slurm_script(
     if campaign_id is None:
         campaign_id = campaign_dir.name
 
+    campaign_dir = campaign_dir.resolve()
+    runs_root = runs_root.resolve()
     script = _SLURM_ARRAY_TEMPLATE.format_map({
         "job_name": campaign_id[:64],
         "account": machine.slurm.account,
@@ -617,36 +619,3 @@ def submit_job(run_dir: Path) -> str:
     job_id = proc.stdout.strip().split()[-1]
     (run_dir / "submit" / "job_id.txt").write_text(job_id + "\n")
     return job_id
-
-
-def start_run(run_dir: Path, python_cmd: str = "python") -> None:
-    """Run the algorithm script directly without going through Slurm.
-
-    Locates the runner script inside `run_dir/algorithm/`, then executes it
-    in a foreground subprocess. Output streams to the calling terminal.
-    The runner handles attempt-directory creation and status tracking itself.
-
-    Parameters
-    ----------
-    run_dir:
-        Root of the run directory. Must contain `algorithm/run_*.py`.
-    python_cmd:
-        Shell command used to invoke the runner, e.g. `"uv run"` or
-        `"python"`. Passed through `shlex.split` so multi-word commands
-        such as `"uv run"` are handled correctly.
-
-    Raises
-    ------
-    FileNotFoundError
-        If no runner script is found in `run_dir/algorithm/`.
-    subprocess.CalledProcessError
-        If the runner exits with a non-zero status.
-    """
-    alg_dir = run_dir / "algorithm"
-    runners = sorted(alg_dir.glob("run_*.py"))
-    if not runners:
-        raise FileNotFoundError(f"No runner script found in {alg_dir}")
-    # Use the first (and typically only) runner script.
-    runner = runners[0]
-    cmd = shlex.split(python_cmd) + [str(runner), "--run-dir", str(run_dir)]
-    subprocess.run(cmd, check=True)
