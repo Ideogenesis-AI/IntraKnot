@@ -26,11 +26,20 @@ import importlib.resources
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import yaml
 
-from .config import MachineConfig, _merge_defaults, load_campaign_defaults, load_config
+from .config import (
+    MachineConfig,
+    SlurmJobConfig,
+    SlurmTomlConfig,
+    _merge_defaults,
+    load_campaign_defaults,
+    load_config,
+    load_slurm_toml,
+    write_slurm_toml,
+)
 from .status import MainStatus, RunState, write_status
 
 
@@ -92,80 +101,226 @@ def _dump_toml(data: dict, _prefix: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Slurm script template (embedded; no separate templates/ directory)
+# Slurm script rendering
 # ---------------------------------------------------------------------------
 
-# Variables filled by str.format_map:
-#   python        — command to invoke the runner (e.g. "uv run")
-#   run_dir       — absolute path to the run directory
-#   job_name      — short job name (run_id)
-#   account       — Slurm account
-#   partition     — Slurm partition
-#   time          — walltime string
-#   mem           — memory string
-#   cpus_per_task — number of CPUs
-#   log_dir       — directory for Slurm log files
-_SLURM_SINGLE_TEMPLATE = """\
-#!/usr/bin/env bash
-#SBATCH --job-name={job_name}
-#SBATCH --account={account}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --mem={mem}
-#SBATCH --cpus-per-task={cpus_per_task}
-#SBATCH --output={log_dir}/slurm-%j.out
+def _render_slurm_header(directives: Dict[str, str]) -> str:
+    """Build `#SBATCH` directive lines from a flag-to-value mapping.
 
-set -euo pipefail
+    Entries whose value is empty or `None` are silently skipped, making
+    optional directives (e.g. `--constraint`, `--mail-type`) easy to omit.
 
-RUN_DIR="{run_dir}"
+    Parameters
+    ----------
+    directives:
+        Ordered mapping of `--flag` (or `-f`) to value string.
 
-echo "Starting DMRG run: $RUN_DIR"
-echo "SLURM_JOB_ID: $SLURM_JOB_ID"
-echo "SLURM_NODELIST: $SLURM_NODELIST"
+    Returns
+    -------
+    str
+        Newline-separated `#SBATCH` lines (no trailing newline).
+    """
+    lines = []
+    for flag, value in directives.items():
+        if value:
+            lines.append(f"#SBATCH {flag}={value}")
+    return "\n".join(lines)
 
-cd "$RUN_DIR"
-{python} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"
-"""
 
-# Array job template — each task maps SLURM_ARRAY_TASK_ID to a run directory
-# via the campaign runs.csv file.
-#   campaign_dir  — absolute path to the campaign directory
-#   runs_root     — absolute path to the runs/ directory
-#   python, account, partition, time, mem, cpus_per_task — same as above
-_SLURM_ARRAY_TEMPLATE = """\
-#!/usr/bin/env bash
-#SBATCH --job-name={job_name}
-#SBATCH --account={account}
-#SBATCH --partition={partition}
-#SBATCH --time={time}
-#SBATCH --mem={mem}
-#SBATCH --cpus-per-task={cpus_per_task}
-#SBATCH --output={campaign_dir}/logs/slurm-%A_%a.out
-#SBATCH --array={array_range}
+def _build_single_script(
+    run_dir: Path,
+    slurm: SlurmTomlConfig,
+    python_cmd: str,
+    run_id: str,
+) -> str:
+    """Render the Slurm submit script for a single primary job.
 
-set -euo pipefail
+    Parameters
+    ----------
+    run_dir:
+        Absolute path to the run directory.
+    slurm:
+        Slurm configuration loaded from `slurm.toml`.
+    python_cmd:
+        Command used to invoke the runner (e.g. `"uv run"`).
+    run_id:
+        Run identifier used as the Slurm job name.
 
-CAMPAIGN_DIR="{campaign_dir}"
-RUNS_ROOT="{runs_root}"
+    Returns
+    -------
+    str
+        Complete bash script text.
+    """
+    log_dir = run_dir / "main" / "logs"
+    header = _render_slurm_header({
+        "--job-name": run_id[:64],
+        "--account": slurm.basic.account,
+        "--partition": slurm.main.partition,
+        "--constraint": slurm.main.constraint,
+        "--time": slurm.main.time,
+        "--mem": str(slurm.main.mem),
+        "--ntasks": str(slurm.main.ntasks),
+        "--nodes": str(slurm.main.nodes),
+        "--cpus-per-task": str(slurm.main.cpus_per_task),
+        "--output": f"{log_dir}/slurm-%j.out",
+        "--error": f"{log_dir}/slurm-%j.err",
+        "--mail-type": slurm.basic.mail_type,
+        "--mail-user": slurm.basic.mail_user,
+    })
+    return (
+        "#!/usr/bin/env bash\n"
+        f"{header}\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        f'RUN_DIR="{run_dir}"\n'
+        "\n"
+        'echo "Starting DMRG run: $RUN_DIR"\n'
+        'echo "SLURM_JOB_ID: $SLURM_JOB_ID"\n'
+        'echo "SLURM_NODELIST: $SLURM_NODELIST"\n'
+        "\n"
+        'cd "$RUN_DIR"\n'
+        f'{python_cmd} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"\n'
+    )
 
-# Resolve run_id from runs.csv using SLURM_ARRAY_TASK_ID.
-RUN_ID=$(awk -F',' -v id="$SLURM_ARRAY_TASK_ID" 'NR>1 && $1==id {{print $2}}' \\
-    "$CAMPAIGN_DIR/runs.csv")
 
-if [[ -z "$RUN_ID" ]]; then
-    echo "ERROR: no run_id found for array_id=$SLURM_ARRAY_TASK_ID" >&2
-    exit 1
-fi
+def _build_array_script(
+    campaign_dir: Path,
+    runs_root: Path,
+    slurm: SlurmTomlConfig,
+    python_cmd: str,
+    campaign_id: str,
+    array_range: str,
+) -> str:
+    """Render the Slurm array submit script for a campaign.
 
-RUN_DIR="$RUNS_ROOT/$RUN_ID"
+    Parameters
+    ----------
+    campaign_dir:
+        Absolute path to the campaign directory.
+    runs_root:
+        Absolute path to the runs/ directory.
+    slurm:
+        Slurm configuration loaded from the campaign's `slurm.toml`.
+    python_cmd:
+        Command used to invoke the runner.
+    campaign_id:
+        Campaign identifier used as the Slurm job name.
+    array_range:
+        Slurm array range string, e.g. `"1-10"` or `"1,3,5"`.
 
-echo "Starting DMRG run: $RUN_DIR"
-echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID  RUN_ID: $RUN_ID"
-echo "SLURM_NODELIST: $SLURM_NODELIST"
+    Returns
+    -------
+    str
+        Complete bash script text.
+    """
+    log_dir = campaign_dir / "logs"
+    header = _render_slurm_header({
+        "--job-name": campaign_id[:64],
+        "--account": slurm.basic.account,
+        "--partition": slurm.main.partition,
+        "--constraint": slurm.main.constraint,
+        "--time": slurm.main.time,
+        "--mem": str(slurm.main.mem),
+        "--ntasks": str(slurm.main.ntasks),
+        "--nodes": str(slurm.main.nodes),
+        "--cpus-per-task": str(slurm.main.cpus_per_task),
+        "--output": f"{log_dir}/slurm-%A_%a.out",
+        "--error": f"{log_dir}/slurm-%A_%a.err",
+        "--array": array_range,
+        "--mail-type": slurm.basic.mail_type,
+        "--mail-user": slurm.basic.mail_user,
+    })
+    return (
+        "#!/usr/bin/env bash\n"
+        f"{header}\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        f'CAMPAIGN_DIR="{campaign_dir}"\n'
+        f'RUNS_ROOT="{runs_root}"\n'
+        "\n"
+        "# Resolve run_id from runs.csv using SLURM_ARRAY_TASK_ID.\n"
+        "RUN_ID=$(awk -F',' -v id=\"$SLURM_ARRAY_TASK_ID\" "
+        "'NR>1 && $1==id {print $2}' \\\n"
+        '    "$CAMPAIGN_DIR/runs.csv")\n'
+        "\n"
+        'if [[ -z "$RUN_ID" ]]; then\n'
+        '    echo "ERROR: no run_id found for array_id=$SLURM_ARRAY_TASK_ID" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        "\n"
+        'RUN_DIR="$RUNS_ROOT/$RUN_ID"\n'
+        "\n"
+        'echo "Starting DMRG run: $RUN_DIR"\n'
+        'echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID  RUN_ID: $RUN_ID"\n'
+        'echo "SLURM_NODELIST: $SLURM_NODELIST"\n'
+        "\n"
+        'cd "$RUN_DIR"\n'
+        f'{python_cmd} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"\n'
+    )
 
-cd "$RUN_DIR"
-{python} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"
-"""
+
+def _build_exec_script(
+    run_dir: Path,
+    script_name: str,
+    slurm: SlurmTomlConfig,
+    python_cmd: str,
+    run_id: str,
+) -> str:
+    """Render the Slurm submit script for an exec (follow-up) job.
+
+    Parameters
+    ----------
+    run_dir:
+        Absolute path to the run directory.
+    script_name:
+        Script identifier (filename without `.py` extension).
+    slurm:
+        Slurm configuration loaded from `slurm.toml`.
+    python_cmd:
+        Command used to invoke the runner.
+    run_id:
+        Run identifier used as the Slurm job name prefix.
+
+    Returns
+    -------
+    str
+        Complete bash script text.
+    """
+    log_dir = run_dir / "exec" / script_name / "logs"
+    job_name = f"{run_id[:48]}_{script_name}"[:64]
+    header = _render_slurm_header({
+        "--job-name": job_name,
+        "--account": slurm.basic.account,
+        "--partition": slurm.exec_.partition,
+        "--constraint": slurm.exec_.constraint,
+        "--time": slurm.exec_.time,
+        "--mem": str(slurm.exec_.mem),
+        "--ntasks": str(slurm.exec_.ntasks),
+        "--nodes": str(slurm.exec_.nodes),
+        "--cpus-per-task": str(slurm.exec_.cpus_per_task),
+        "--output": f"{log_dir}/slurm-%j.out",
+        "--error": f"{log_dir}/slurm-%j.err",
+        "--mail-type": slurm.basic.mail_type,
+        "--mail-user": slurm.basic.mail_user,
+    })
+    return (
+        "#!/usr/bin/env bash\n"
+        f"{header}\n"
+        "\n"
+        "set -euo pipefail\n"
+        "\n"
+        f'RUN_DIR="{run_dir}"\n'
+        "\n"
+        f'echo "Starting exec job: {script_name}"\n'
+        'echo "Run dir: $RUN_DIR"\n'
+        'echo "SLURM_JOB_ID: $SLURM_JOB_ID"\n'
+        'echo "SLURM_NODELIST: $SLURM_NODELIST"\n'
+        "\n"
+        'cd "$RUN_DIR"\n'
+        f'{python_cmd} "$RUN_DIR/algorithm/{script_name}.py" --run-dir "$RUN_DIR"\n'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +382,68 @@ def _copy_algorithm(src: Path, dest_dir: Path) -> None:
     shutil.copy2(src, alg_dir / src.name)
 
 
+def _find_exec_script(
+    script_name: str,
+    run_dir: Path,
+    campaign_dir: Path,
+) -> Path:
+    """Locate an exec script by searching the run, campaign, then package.
+
+    Search order:
+
+    1. `<run_dir>/algorithm/<script_name>.py` — already promoted to the run.
+    2. `<campaign_dir>/algorithm/<script_name>.py` — campaign-level custom
+       script.
+    3. `intraknot.algorithm/<script_name>.py` — bundled package script.
+
+    Parameters
+    ----------
+    script_name:
+        Script filename without the `.py` extension.
+    run_dir:
+        Root of the run directory.
+    campaign_dir:
+        Root of the owning campaign directory.
+
+    Returns
+    -------
+    Path
+        Absolute path to the located script.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the script cannot be found in any of the three locations.
+    """
+    candidates = [
+        run_dir / "algorithm" / f"{script_name}.py",
+        campaign_dir / "algorithm" / f"{script_name}.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+
+    # Fall back to the bundled package.
+    try:
+        ref = importlib.resources.files("intraknot.algorithm") / f"{script_name}.py"
+        with importlib.resources.as_file(ref) as p:
+            src = Path(p)
+        if src.exists():
+            return src
+    except (FileNotFoundError, TypeError):
+        pass
+
+    here = Path(__file__).parent
+    bundled = here / "algorithm" / f"{script_name}.py"
+    if bundled.exists():
+        return bundled
+
+    raise FileNotFoundError(
+        f"Exec script {script_name!r} not found. "
+        f"Searched: {candidates[0]}, {candidates[1]}, and the intraknot package."
+    )
+
+
 def update_current(run_dir: Path, attempt_name: str) -> None:
     """Update `main/current` to point to `attempt_name`.
 
@@ -259,12 +476,15 @@ def create_campaign(
     description: str,
     algorithm: str,
     campaigns_root: Path,
+    configs_dir: Optional[Path] = None,
 ) -> Path:
     """Create a new campaign directory with all standard files.
 
     Writes `campaign.yaml`, a template `defaults.toml`, an empty `runs.csv`
     (header only), a blank `notes.md`, and copies the algorithm runner to
-    `<campaign_id>/algorithm/`.
+    `<campaign_id>/algorithm/`. A `slurm.toml` is copied from `configs_dir`
+    if provided and the file exists there, otherwise the default template is
+    written directly.
 
     Parameters
     ----------
@@ -276,6 +496,10 @@ def create_campaign(
         Algorithm name whose runner script will be copied (e.g. `"dmrg"`).
     campaigns_root:
         Parent directory where the campaign subdirectory is created.
+    configs_dir:
+        Path to the project `configs/` directory. When given and
+        `configs_dir/slurm.toml` exists, that file is copied into the
+        campaign. Otherwise the built-in template is written.
 
     Returns
     -------
@@ -321,6 +545,14 @@ def create_campaign(
         "observables     = [\"energy\", \"entropy\"]\n"
     )
 
+    # slurm.toml — copy from configs/ or write built-in template.
+    slurm_dest = campaign_dir / "slurm.toml"
+    global_slurm = configs_dir / "slurm.toml" if configs_dir else None
+    if global_slurm and global_slurm.exists():
+        shutil.copy2(global_slurm, slurm_dest)
+    else:
+        write_slurm_toml(slurm_dest)
+
     # runs.csv — parameter table (array_id column is optional; omit for now).
     with open(campaign_dir / "runs.csv", "w", newline="") as f:
         writer = csv.writer(f)
@@ -354,11 +586,9 @@ def create_run(
     """Create a new run directory with all standard files and subdirectories.
 
     Merges `config_src` (if given) with the campaign's `defaults.toml` to
-    produce the run's `config.toml`. The `[model]`, `[algorithm]`, and
-    `[output]` sections from `defaults.toml` serve as fallbacks; run-level
-    values always win. When `config_src` is `None`, the campaign defaults
-    alone form the full configuration — useful when `defaults.toml` already
-    carries `[model]`.
+    produce the run's `config.toml`. The `slurm.toml` is copied verbatim from
+    the campaign directory; edit it before submitting to override Slurm
+    resource settings for this specific run.
 
     Parameters
     ----------
@@ -399,20 +629,26 @@ def create_run(
     if not campaign_dir.exists():
         raise FileNotFoundError(f"Campaign not found: {campaign_dir}")
 
-    # Load and merge configs.
+    # Load and merge physics configs.
     user_cfg = load_config(config_src) if config_src is not None else None
     defaults = load_campaign_defaults(campaign_dir)
     merged_cfg = _merge_defaults(user_cfg, defaults)
 
     # Create directory skeleton.
     run_dir.mkdir(parents=True)
-    (run_dir / "submit").mkdir()
-    (run_dir / "logs").mkdir()
     (run_dir / "main" / "attempts").mkdir(parents=True)
+    (run_dir / "main" / "logs").mkdir(parents=True)
     (run_dir / "summary").mkdir()
 
     # Write merged config.toml (source of truth for this run's science).
     (run_dir / "config.toml").write_text(_dump_toml(merged_cfg))
+
+    # Copy slurm.toml from campaign (straight copy; user edits for per-run overrides).
+    campaign_slurm = campaign_dir / "slurm.toml"
+    if campaign_slurm.exists():
+        shutil.copy2(campaign_slurm, run_dir / "slurm.toml")
+    else:
+        write_slurm_toml(run_dir / "slurm.toml")
 
     # manifest.yaml — identity record (YAML).
     campaign_yaml = load_config(campaign_dir / "campaign.yaml")
@@ -423,7 +659,7 @@ def create_run(
         "algorithm": algorithm,
         "status": RunState.PENDING.value,
         "created_at": datetime.date.today().isoformat(),
-        "machine": machine.slurm.account if machine else "",
+        "machine": machine.paths.run_root if machine else "",
     }
     (run_dir / "manifest.yaml").write_text(
         yaml.dump(manifest, default_flow_style=False, sort_keys=False)
@@ -482,7 +718,7 @@ def create_attempt(run_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Slurm script rendering and submission
+# Slurm script rendering and submission — primary job
 # ---------------------------------------------------------------------------
 
 def write_slurm_script(
@@ -490,14 +726,17 @@ def write_slurm_script(
     machine: MachineConfig,
     run_id: Optional[str] = None,
 ) -> Path:
-    """Render and write `submit/submit.slurm` for a single-run job.
+    """Render and write `main/submit.slurm` for a single-run primary job.
+
+    Reads Slurm settings from `run_dir/slurm.toml`. Creates `main/logs/` if
+    it does not yet exist.
 
     Parameters
     ----------
     run_dir:
         Root of the run directory.
     machine:
-        Machine configuration supplying Slurm and path settings.
+        Machine configuration supplying the Python command.
     run_id:
         Run identifier used as the Slurm job name. Defaults to the directory
         name of `run_dir`.
@@ -511,23 +750,13 @@ def write_slurm_script(
         run_id = run_dir.name
 
     run_dir = run_dir.resolve()
-    log_dir = run_dir / "logs"
+    log_dir = run_dir / "main" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    script = _SLURM_SINGLE_TEMPLATE.format_map({
-        "job_name": run_id[:64],  # Slurm truncates names >64 chars.
-        "account": machine.slurm.account,
-        "partition": machine.slurm.partition,
-        "time": machine.slurm.default_time,
-        "mem": machine.slurm.default_mem,
-        "cpus_per_task": machine.slurm.default_cpus_per_task,
-        "log_dir": log_dir,
-        "run_dir": run_dir,
-        "python": machine.paths.python,
-    })
+    slurm = load_slurm_toml(run_dir / "slurm.toml")
+    script = _build_single_script(run_dir, slurm, machine.paths.python, run_id)
 
-    out = run_dir / "submit" / "submit.slurm"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out = run_dir / "main" / "submit.slurm"
     out.write_text(script)
     return out
 
@@ -541,6 +770,8 @@ def write_array_slurm_script(
 ) -> Path:
     """Render and write `submit_array.slurm` for a campaign-level array job.
 
+    Reads Slurm settings from `campaign_dir/slurm.toml`.
+
     Parameters
     ----------
     campaign_dir:
@@ -548,7 +779,7 @@ def write_array_slurm_script(
     runs_root:
         Root directory containing run subdirectories.
     machine:
-        Machine configuration.
+        Machine configuration supplying the Python command.
     array_range:
         Slurm array range string, e.g. `"1-10"` or `"1,3,5"`.
     campaign_id:
@@ -564,18 +795,11 @@ def write_array_slurm_script(
 
     campaign_dir = campaign_dir.resolve()
     runs_root = runs_root.resolve()
-    script = _SLURM_ARRAY_TEMPLATE.format_map({
-        "job_name": campaign_id[:64],
-        "account": machine.slurm.account,
-        "partition": machine.slurm.partition,
-        "time": machine.slurm.default_time,
-        "mem": machine.slurm.default_mem,
-        "cpus_per_task": machine.slurm.default_cpus_per_task,
-        "campaign_dir": campaign_dir,
-        "runs_root": runs_root,
-        "python": machine.paths.python,
-        "array_range": array_range,
-    })
+
+    slurm = load_slurm_toml(campaign_dir / "slurm.toml")
+    script = _build_array_script(
+        campaign_dir, runs_root, slurm, machine.paths.python, campaign_id, array_range
+    )
 
     out = campaign_dir / "submit_array.slurm"
     out.write_text(script)
@@ -583,15 +807,15 @@ def write_array_slurm_script(
 
 
 def submit_job(run_dir: Path) -> str:
-    """Submit the Slurm job for a run and record the job ID.
+    """Submit the primary Slurm job for a run and record the job ID.
 
-    Calls `sbatch submit/submit.slurm` from within `run_dir`. The assigned
-    job ID is written to `submit/job_id.txt`.
+    Calls `sbatch main/submit.slurm` from within `run_dir`. The assigned
+    job ID is written to `main/job_id.txt`.
 
     Parameters
     ----------
     run_dir:
-        Root of the run directory. Must contain `submit/submit.slurm`.
+        Root of the run directory. Must contain `main/submit.slurm`.
 
     Returns
     -------
@@ -601,11 +825,11 @@ def submit_job(run_dir: Path) -> str:
     Raises
     ------
     FileNotFoundError
-        If `submit/submit.slurm` does not exist.
+        If `main/submit.slurm` does not exist.
     subprocess.CalledProcessError
         If `sbatch` exits with a non-zero status.
     """
-    script = run_dir / "submit" / "submit.slurm"
+    script = run_dir / "main" / "submit.slurm"
     if not script.exists():
         raise FileNotFoundError(f"Slurm script not found: {script}")
 
@@ -617,5 +841,119 @@ def submit_job(run_dir: Path) -> str:
     )
     # sbatch output: "Submitted batch job 12345678"
     job_id = proc.stdout.strip().split()[-1]
-    (run_dir / "submit" / "job_id.txt").write_text(job_id + "\n")
+    (run_dir / "main" / "job_id.txt").write_text(job_id + "\n")
+    return job_id
+
+
+# ---------------------------------------------------------------------------
+# Exec job infrastructure
+# ---------------------------------------------------------------------------
+
+def prepare_exec(
+    run_dir: Path,
+    script_name: str,
+    campaign_dir: Path,
+) -> Path:
+    """Locate an exec script, promote it to the run's `algorithm/` directory,
+    and create the `exec/<script_name>/` slot with its `logs/` subdirectory.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    script_name:
+        Script filename without the `.py` extension.
+    campaign_dir:
+        Root of the owning campaign directory (used for script search).
+
+    Returns
+    -------
+    Path
+        Absolute path to the `exec/<script_name>/` slot directory.
+    """
+    # Locate and promote the script.
+    src = _find_exec_script(script_name, run_dir, campaign_dir)
+    dest = run_dir / "algorithm" / f"{script_name}.py"
+    if not dest.exists():
+        shutil.copy2(src, dest)
+
+    # Create the exec slot.
+    slot = run_dir / "exec" / script_name
+    (slot / "logs").mkdir(parents=True, exist_ok=True)
+    return slot
+
+
+def write_exec_slurm_script(
+    run_dir: Path,
+    script_name: str,
+    machine: MachineConfig,
+) -> Path:
+    """Render and write `exec/<script_name>/submit.slurm`.
+
+    Uses the `[exec]` section of `run_dir/slurm.toml` for resource settings.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    script_name:
+        Script filename without the `.py` extension.
+    machine:
+        Machine configuration supplying the Python command.
+
+    Returns
+    -------
+    Path
+        Path to the written `submit.slurm` file.
+    """
+    run_dir = run_dir.resolve()
+    run_id = run_dir.name
+
+    slurm = load_slurm_toml(run_dir / "slurm.toml")
+    script = _build_exec_script(run_dir, script_name, slurm, machine.paths.python, run_id)
+
+    out = run_dir / "exec" / script_name / "submit.slurm"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(script)
+    return out
+
+
+def submit_exec_job(run_dir: Path, script_name: str) -> str:
+    """Submit an exec job to Slurm and record the job ID.
+
+    Calls `sbatch exec/<script_name>/submit.slurm`. The job ID is written to
+    `exec/<script_name>/job_id.txt`.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    script_name:
+        Script filename without the `.py` extension.
+
+    Returns
+    -------
+    str
+        Slurm job ID string.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the submit script does not exist (call `write_exec_slurm_script`
+        first).
+    subprocess.CalledProcessError
+        If `sbatch` exits with a non-zero status.
+    """
+    script = run_dir / "exec" / script_name / "submit.slurm"
+    if not script.exists():
+        raise FileNotFoundError(f"Exec Slurm script not found: {script}")
+
+    proc = subprocess.run(
+        ["sbatch", str(script)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    job_id = proc.stdout.strip().split()[-1]
+    (run_dir / "exec" / script_name / "job_id.txt").write_text(job_id + "\n")
     return job_id
