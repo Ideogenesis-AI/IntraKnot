@@ -13,14 +13,14 @@ The key rule is: **same scientific definition → new attempt; changed scientifi
 ## Core concepts
 
 ```
-campaign  a scientific group or parameter study
-run       one simulation case, usually one parameter point
-main      the primary calculation of a run
-task      optional sub-calculation inside a run
-attempt   one execution try of main or a task
+campaign   a scientific group or parameter study
+run        one simulation case, usually one parameter point
+main       the primary calculation of a run (e.g. DMRG ground-state search)
+attempt    one execution try of main; new attempts are created on failure
+exec job   a follow-up computation on a completed run (measurements, analysis, etc.)
 ```
 
-Most calculations follow the simple path `campaign → run → main → attempt`. The optional `tasks/` layer is available when a run has multiple independently tracked sub-calculations (e.g., disorder samples or measurement chunks), but should not be used otherwise.
+Most calculations follow the simple path `campaign → run → main → attempt`. Once a ground state is obtained, any number of exec jobs (bespoke Python scripts) can be run against it under the `exec/` directory of the run.
 
 ## Repository layout
 
@@ -52,20 +52,40 @@ intraknot/
 ```
 configs/
 ├── machines.yaml   # YAML: registry of known clusters (labels, notes)
-├── slurm.toml      # TOML: Slurm account, partition, walltime, resources
+├── slurm.toml      # TOML: master Slurm template (copied to each campaign on creation)
 └── paths.toml      # TOML: run root, scratch, node-local scratch, Python executable
 ```
+
+`configs/slurm.toml` is the **master Slurm template**. It is copied verbatim to each campaign when `iknot campaign create` is run, and from there to each run when `iknot run create` is run. Users edit the campaign copy for campaign-wide settings (e.g. walltime for a given bond dimension), or the run copy for a single-run override. No merging happens — the copy in the run directory is what gets submitted.
 
 Example `slurm.toml`:
 
 ```toml
-[slurm]
-account           = "my_account"
-partition         = "normal"
-default_time      = "04:00:00"
-default_mem       = "16G"
-default_cpus_per_task = 8
+[basic]
+account   = "my_account"    # shared by all jobs in this run
+mail_type = "ALL"            # --mail-type; leave "" to omit
+mail_user = "user@lmu.de"   # --mail-user; leave "" to omit
+
+[main]
+partition     = "cluster"
+constraint    = "x86-64-v4&fast-io&ht"  # -C; leave "" to omit
+time          = "504:00:00"
+mem           = "300000"                 # passed verbatim to --mem (MB or "300G")
+ntasks        = 1
+nodes         = 1
+cpus_per_task = 64
+
+[exec]
+partition     = "cluster"   # can differ from [main] for lighter follow-up jobs
+constraint    = "x86-64-v4&fast-io&ht"
+time          = "02:00:00"
+mem           = "32000"
+ntasks        = 1
+nodes         = 1
+cpus_per_task = 8
 ```
+
+`[basic]` carries fields shared by every job in the run (account, mail). `[main]` controls resources for the primary job; `[exec]` controls resources for all exec follow-up jobs. Optional fields (`constraint`, `mail_type`, `mail_user`) are only emitted as `#SBATCH` directives when non-empty.
 
 Example `paths.toml`:
 
@@ -79,17 +99,19 @@ python             = "uv run"
 
 ### Campaigns
 
-A campaign records which runs belong together and why. Each campaign also carries a `defaults.toml` with settings shared by all its runs.
+A campaign records which runs belong together and why. Each campaign carries a `defaults.toml` with physics settings shared by all its runs, and a `slurm.toml` with default Slurm resource settings.
 
 ```
 campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: id, description, algorithm, created_at
 ├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
+├── slurm.toml          # TOML: Slurm defaults for all runs (copied from configs/)
 ├── runs.csv            # CSV: parameter table and per-run status
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
 └── algorithm/
-    └── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
+    ├── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
+    └── <any>.py        # custom exec scripts placed here are auto-discovered
 ```
 
 `defaults.toml` is generated with `[algorithm]` and `[output]` sections. You can also add `[geometry]` and `[model]` sections by hand when all runs in a campaign share the same physical model — `iknot run create` will then need no `--config` argument at all.
@@ -105,34 +127,44 @@ array_id,run_id,L,chi,g,status
 
 ### Runs
 
-A run is one simulation case, typically one parameter point. Each run carries its own copy of the algorithm runner and its full scientific configuration.
+A run is one simulation case, typically one parameter point. It carries its own copy of the algorithm runner, its full scientific configuration (`config.toml`), and its Slurm resource settings (`slurm.toml`).
 
 ```
 runs/heis_L64_chi128_g1.0/
-├── manifest.yaml        # YAML: run identity, campaign, code version, machine
-├── config.toml          # TOML: Alice-compatible scientific + algorithm + output config
+├── manifest.yaml        # YAML: run identity, campaign, algorithm, machine
+├── config.toml          # TOML: physics-only config (geometry, model, algorithm, output)
+├── slurm.toml           # TOML: Slurm resources (copied from campaign; edit before submit)
 ├── algorithm/
-│   └── run_dmrg.py      # copied from campaign/algorithm/
-├── submit/              # Slurm script and recorded job ID
-├── logs/                # scheduler-level logs
+│   ├── run_dmrg.py      # primary runner, copied from campaign/algorithm/
+│   └── <any>.py         # exec scripts promoted here on first use
 ├── main/
-│   ├── status.json
-│   ├── attempts/
-│   │   └── attempt_01/
-│   │       ├── alice.log        # Alice logging output (DEBUG+, timestamped)
-│   │       ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
-│   │       ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
-│   │       ├── state.ckpt       # final MPS state (torch.save)
-│   │       ├── observables.json
-│   │       ├── convergence.csv
-│   │       └── status.json
-│   └── current -> attempts/attempt_01
+│   ├── submit.slurm     # Slurm script for the primary job
+│   ├── job_id.txt       # Slurm job ID written after sbatch
+│   ├── status.json      # primary job state
+│   ├── logs/            # Slurm stdout/stderr for the primary job
+│   ├── current -> attempts/attempt_01
+│   └── attempts/
+│       └── attempt_01/
+│           ├── alice.log        # Alice logging output (DEBUG+, timestamped)
+│           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
+│           ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
+│           ├── state.ckpt       # final MPS state (torch.save)
+│           ├── observables.json
+│           ├── convergence.csv
+│           └── status.json
+├── exec/                # all exec (follow-up) jobs; one slot per script
+│   └── compute_sf/
+│       ├── submit.slurm
+│       ├── job_id.txt
+│       ├── status.json
+│       ├── logs/
+│       └── <outputs>
 └── summary/
     ├── observables.json
     └── status.json
 ```
 
-`config.toml` is the source of truth for the scientific configuration of a run. It must not be silently modified after the run is created.
+`config.toml` is the source of truth for the scientific configuration of a run and must not be silently modified after the run is created. `slurm.toml` is the source of truth for Slurm resource requests; edit it before submitting if a particular run needs non-default resources.
 
 ### Run scientific config (`config.toml`)
 
@@ -217,6 +249,8 @@ iknot campaign status   # shows active campaign and its source
 iknot campaign deactivate
 ```
 
+When `iknot campaign create` is run, `configs/slurm.toml` is copied into the campaign directory. Edit `campaigns/<id>/slurm.toml` to set campaign-wide Slurm defaults before creating runs.
+
 The active campaign is read from the `INTRAKNOT_CAMPAIGN` environment variable (takes precedence) or from the local `.iknot_state` file. Setting the variable in the shell is optional; the state file is sufficient.
 
 ### Create and submit runs
@@ -234,7 +268,31 @@ iknot run start heis_L64_chi128_g1.0
 iknot run submit heis_L64_chi128_g1.0
 ```
 
+`iknot run create` copies `slurm.toml` from the campaign into the run. Edit `runs/<id>/slurm.toml` before submitting if this particular run needs different resources (e.g. a higher-bond-dimension run needing more memory).
+
 `iknot run start` writes the same Slurm script as `submit`, then executes it locally with `sh`. `SLURM_JOB_ID` and `SLURM_NODELIST` are stubbed automatically so the script runs without a Slurm daemon. This is useful on workstations or for interactive testing where Slurm is not available.
+
+### Run exec (follow-up) jobs
+
+Once a primary job has completed, follow-up computations are launched with `iknot run exec`. These can be arbitrary Python scripts — measurements, entanglement spectra, structure factors, diagnostics — placed in `campaigns/<id>/algorithm/` and named anything.
+
+```bash
+# Submit an exec job (uses [exec] section of slurm.toml for resources)
+iknot run exec compute_sf heis_L64_chi128_g1.0
+
+# Run locally without Slurm
+iknot run exec compute_sf heis_L64_chi128_g1.0 --local
+
+# Pin to a specific attempt (default: uses main/current)
+iknot run exec compute_sf heis_L64_chi128_g1.0 --attempt attempt_02
+```
+
+The script `compute_sf.py` is searched for in:
+1. `runs/<id>/algorithm/compute_sf.py` (already promoted)
+2. `campaigns/<id>/algorithm/compute_sf.py` (campaign-level)
+3. The `intraknot` package (bundled scripts)
+
+Results land in `runs/<id>/exec/compute_sf/`. Each exec script receives `--run-dir` and is responsible for writing its own outputs and updating `exec/<name>/status.json`.
 
 ### Collect results and retry failures
 
@@ -244,11 +302,13 @@ iknot collect campaign --id heisenberg_dmrg_chi_scan
 iknot resume campaign --id heisenberg_dmrg_chi_scan
 ```
 
-### Inspect a single run
+### Inspect a run
 
 ```bash
 iknot status heis_L64_chi128_g1.0
 ```
+
+Prints primary job state, current attempt, energy and convergence (if collected), and a summary line for each exec job slot found under `exec/`.
 
 ## Installation
 
