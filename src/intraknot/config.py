@@ -20,8 +20,15 @@
 
 Two namespaces are kept strictly separate:
 
-    configs/slurm.toml + configs/paths.toml
-        Machine and scheduler settings — where and how to run.
+    configs/paths.toml
+        Machine filesystem settings — where to find the Python interpreter,
+        scratch directories, etc.
+
+    slurm.toml  (lives in configs/, campaigns/, and runs/)
+        Slurm scheduling settings — account, partition, resource requests.
+        The file at configs/ is the master template; it is copied verbatim to
+        each campaign on creation, and from there to each run. Users edit the
+        copies to customise settings at the desired granularity.
 
     runs/<run_id>/config.toml
         Scientific simulation configuration — what to run (Alice-compatible).
@@ -45,28 +52,76 @@ import yaml
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SlurmConfig:
-    """Slurm scheduler settings read from `configs/slurm.toml`.
+class SlurmBasicConfig:
+    """Fields in the `[basic]` section of `slurm.toml`.
+
+    These are shared by every job (primary and exec) in a run.
 
     Parameters
     ----------
     account:
-        Slurm account name.
-    partition:
-        Target partition (queue).
-    default_time:
-        Default walltime string, e.g. `"04:00:00"`.
-    default_mem:
-        Default memory per node, e.g. `"16G"`.
-    default_cpus_per_task:
-        Default number of CPUs per Slurm task.
+        Slurm account / project code.
+    mail_type:
+        `--mail-type` value, e.g. `"ALL"` or `"END,FAIL"`. Leave empty to
+        omit the directive entirely.
+    mail_user:
+        Email address for job notifications. Leave empty to omit.
     """
 
     account: str = ""
+    mail_type: str = ""
+    mail_user: str = ""
+
+
+@dataclass
+class SlurmJobConfig:
+    """Fields in a `[main]` or `[exec]` section of `slurm.toml`.
+
+    Parameters
+    ----------
+    partition:
+        Target Slurm partition (queue).
+    constraint:
+        Node constraint string passed to `-C`. Leave empty to omit.
+    time:
+        Walltime string, e.g. `"504:00:00"`.
+    mem:
+        Memory per node passed verbatim to `--mem` (e.g. `"300000"` for
+        300 000 MB, or `"300G"`).
+    ntasks:
+        `--ntasks` value. Typically 1 for threaded (non-MPI) jobs.
+    nodes:
+        `--nodes` value.
+    cpus_per_task:
+        `--cpus-per-task` value (number of CPU threads).
+    """
+
     partition: str = ""
-    default_time: str = "04:00:00"
-    default_mem: str = "16G"
-    default_cpus_per_task: int = 8
+    constraint: str = ""
+    time: str = "04:00:00"
+    mem: str = "16000"
+    ntasks: int = 1
+    nodes: int = 1
+    cpus_per_task: int = 8
+
+
+@dataclass
+class SlurmTomlConfig:
+    """Full contents of a `slurm.toml` file.
+
+    Parameters
+    ----------
+    basic:
+        Shared account and mail settings.
+    main:
+        Resource settings for the primary (DMRG) job.
+    exec_:
+        Resource settings for exec (follow-up) jobs.
+    """
+
+    basic: SlurmBasicConfig = field(default_factory=SlurmBasicConfig)
+    main: SlurmJobConfig = field(default_factory=SlurmJobConfig)
+    exec_: SlurmJobConfig = field(default_factory=SlurmJobConfig)
 
 
 @dataclass
@@ -94,17 +149,18 @@ class PathsConfig:
 
 @dataclass
 class MachineConfig:
-    """Combined machine configuration assembled from `slurm.toml` + `paths.toml`.
+    """Machine configuration assembled from `configs/paths.toml`.
+
+    Slurm scheduling settings are no longer part of `MachineConfig`; they
+    live in `slurm.toml` at the run level and are loaded on demand by
+    `load_slurm_toml`.
 
     Parameters
     ----------
-    slurm:
-        Slurm scheduler settings.
     paths:
         Filesystem path settings.
     """
 
-    slurm: SlurmConfig = field(default_factory=SlurmConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
 
 
@@ -146,38 +202,73 @@ def load_config(path: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Machine config loaders
+# Slurm TOML loader
+# ---------------------------------------------------------------------------
+
+def load_slurm_toml(path: Path) -> SlurmTomlConfig:
+    """Load a `slurm.toml` file into a `SlurmTomlConfig`.
+
+    Returns a default-filled `SlurmTomlConfig` when the file is absent so
+    callers never need to guard against a missing `slurm.toml`.
+
+    Parameters
+    ----------
+    path:
+        Path to the `slurm.toml` file.
+
+    Returns
+    -------
+    SlurmTomlConfig
+        Parsed Slurm settings with dataclass defaults for missing keys.
+    """
+    if not path.exists():
+        return SlurmTomlConfig()
+
+    raw = load_config(path)
+    basic_raw = raw.get("basic", {})
+    main_raw = raw.get("main", {})
+    exec_raw = raw.get("exec", {})
+
+    basic = SlurmBasicConfig(
+        account=basic_raw.get("account", ""),
+        mail_type=basic_raw.get("mail_type", ""),
+        mail_user=basic_raw.get("mail_user", ""),
+    )
+
+    def _job(d: dict) -> SlurmJobConfig:
+        return SlurmJobConfig(
+            partition=d.get("partition", ""),
+            constraint=d.get("constraint", ""),
+            time=d.get("time", "04:00:00"),
+            mem=str(d.get("mem", "16000")),
+            ntasks=int(d.get("ntasks", 1)),
+            nodes=int(d.get("nodes", 1)),
+            cpus_per_task=int(d.get("cpus_per_task", 8)),
+        )
+
+    return SlurmTomlConfig(basic=basic, main=_job(main_raw), exec_=_job(exec_raw))
+
+
+# ---------------------------------------------------------------------------
+# Machine config loader
 # ---------------------------------------------------------------------------
 
 def load_machine_config(configs_dir: Path) -> MachineConfig:
-    """Assemble a `MachineConfig` from `configs/slurm.toml` and `configs/paths.toml`.
+    """Assemble a `MachineConfig` from `configs/paths.toml`.
 
-    Missing keys are filled with dataclass defaults so that the caller never
-    needs to guard against absent optional fields.
+    Missing keys are filled with dataclass defaults.
 
     Parameters
     ----------
     configs_dir:
-        Directory containing `slurm.toml` and `paths.toml`.
+        Directory containing `paths.toml`.
 
     Returns
     -------
     MachineConfig
         Populated machine configuration.
     """
-    slurm_cfg = SlurmConfig()
     paths_cfg = PathsConfig()
-
-    slurm_path = configs_dir / "slurm.toml"
-    if slurm_path.exists():
-        raw = load_config(slurm_path).get("slurm", {})
-        slurm_cfg = SlurmConfig(
-            account=raw.get("account", slurm_cfg.account),
-            partition=raw.get("partition", slurm_cfg.partition),
-            default_time=raw.get("default_time", slurm_cfg.default_time),
-            default_mem=raw.get("default_mem", slurm_cfg.default_mem),
-            default_cpus_per_task=raw.get("default_cpus_per_task", slurm_cfg.default_cpus_per_task),
-        )
 
     paths_path = configs_dir / "paths.toml"
     if paths_path.exists():
@@ -189,7 +280,7 @@ def load_machine_config(configs_dir: Path) -> MachineConfig:
             python=raw.get("python", paths_cfg.python),
         )
 
-    return MachineConfig(slurm=slurm_cfg, paths=paths_cfg)
+    return MachineConfig(paths=paths_cfg)
 
 
 def load_campaign_defaults(campaign_dir: Path) -> Dict[str, Any]:
@@ -243,7 +334,7 @@ def load_run_config(run_dir: Path) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Template generators (called by `iknot init`)
+# Template generators (called by `iknot init` and campaign/run creation)
 # ---------------------------------------------------------------------------
 
 _MACHINES_YAML_TEMPLATE = """\
@@ -262,15 +353,35 @@ machines: []
 """
 
 _SLURM_TOML_TEMPLATE = """\
-# configs/slurm.toml
-# Slurm scheduler settings. Fill in the values for your cluster.
+# slurm.toml
+# Slurm scheduling settings.
+#
+# This file is the master template. It is copied verbatim to each campaign
+# on creation, and from there to each run. Edit the campaign copy for
+# campaign-wide defaults; edit the run copy for per-run overrides.
 
-[slurm]
-account           = ""          # Slurm account / project code
-partition         = ""          # Target partition (queue)
-default_time      = "04:00:00"  # Default walltime (HH:MM:SS)
-default_mem       = "16G"       # Default memory per node
-default_cpus_per_task = 8       # Default CPUs per task
+[basic]
+account   = ""          # Slurm account / project code
+mail_type = ""          # --mail-type (e.g. "ALL", "END,FAIL"); leave "" to omit
+mail_user = ""          # email address for notifications; leave "" to omit
+
+[main]
+partition     = ""          # target partition (queue)
+constraint    = ""          # node constraint (-C); leave "" to omit
+time          = "04:00:00"  # walltime (HH:MM:SS)
+mem           = "16000"     # memory per node (MB integer or e.g. "16G")
+ntasks        = 1           # --ntasks (1 for threaded jobs)
+nodes         = 1           # --nodes
+cpus_per_task = 8           # number of CPU threads
+
+[exec]
+partition     = ""          # can differ from [main] for lighter follow-up jobs
+constraint    = ""
+time          = "01:00:00"
+mem           = "8000"
+ntasks        = 1
+nodes         = 1
+cpus_per_task = 4
 """
 
 _PATHS_TOML_TEMPLATE = """\
@@ -300,7 +411,7 @@ def write_machines_yaml(path: Path) -> None:
 
 
 def write_slurm_toml(path: Path) -> None:
-    """Write a placeholder `slurm.toml` template to `path`.
+    """Write the `slurm.toml` template to `path`.
 
     Parameters
     ----------
