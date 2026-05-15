@@ -102,14 +102,16 @@ def _write_state(data: dict) -> None:
 def _resolve_active_campaign() -> tuple[Optional[str], str]:
     """Return `(campaign_id, source)` for the currently active campaign.
 
+    The source string is one of `"env"`, `"file"`, or `"none"`.
+
     Returns `(None, "none")` when no campaign is active.
     """
     env_val = os.environ.get("INTRAKNOT_CAMPAIGN")
     if env_val:
-        return env_val, "env:INTRAKNOT_CAMPAIGN"
+        return env_val, "env"
     state = _read_state()
     if "active_campaign" in state:
-        return state["active_campaign"], f"file:{_STATE_FILE}"
+        return state["active_campaign"], "file"
     return None, "none"
 
 
@@ -313,8 +315,18 @@ def campaign_status() -> None:
     """Show the currently active campaign."""
     campaign_id, source = _resolve_active_campaign()
     if campaign_id:
+        source_labels = {
+            "env":  "Source (env)    ",
+            "file": "Source (file)   ",
+        }
+        source_values = {
+            "env":  "$INTRAKNOT_CAMPAIGN",
+            "file": _STATE_FILE,
+        }
+        label = source_labels.get(source, "Source          ")
+        value = source_values.get(source, source)
         click.echo(f"Active campaign : {campaign_id}")
-        click.echo(f"Source          : {source}")
+        click.echo(f"{label}: {value}")
     else:
         click.echo("No active campaign.")
         click.echo("Use `iknot campaign activate <id>` to set one.")
