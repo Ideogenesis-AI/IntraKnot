@@ -690,9 +690,8 @@ def create_run(
         "run_id": run_id,
         "campaign": campaign_id,
         "algorithm": algorithm,
-        "status": RunState.PENDING.value,
         "created_at": datetime.date.today().isoformat(),
-        "machine": machine.paths.run_root if machine else "",
+        "machine": machine.paths.project_root if machine else "",
     }
     (run_dir / "manifest.yaml").write_text(
         yaml.dump(manifest, default_flow_style=False, sort_keys=False)
@@ -977,7 +976,7 @@ def write_slurm_script(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     slurm = load_slurm_toml(run_dir / "slurm.toml")
-    script = _build_single_script(run_dir, slurm, machine.paths.python, run_id)
+    script = _build_single_script(run_dir, slurm, machine.paths.command, run_id)
 
     out = run_dir / "main" / "submit.slurm"
     out.write_text(script)
@@ -1021,7 +1020,7 @@ def write_array_slurm_script(
 
     slurm = load_slurm_toml(campaign_dir / "slurm.toml")
     script = _build_array_script(
-        campaign_dir, runs_root, slurm, machine.paths.python, campaign_id, array_range
+        campaign_dir, runs_root, slurm, machine.paths.command, campaign_id, array_range
     )
 
     out = campaign_dir / "submit_array.slurm"
@@ -1133,7 +1132,7 @@ def write_exec_slurm_script(
     run_id = run_dir.name
 
     slurm = load_slurm_toml(run_dir / "slurm.toml")
-    script = _build_exec_script(run_dir, script_name, slurm, machine.paths.python, run_id)
+    script = _build_exec_script(run_dir, script_name, slurm, machine.paths.command, run_id)
 
     out = run_dir / "exec" / script_name / "submit.slurm"
     out.parent.mkdir(parents=True, exist_ok=True)
