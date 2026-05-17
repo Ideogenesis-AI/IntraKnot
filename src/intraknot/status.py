@@ -151,12 +151,16 @@ class MainStatus:
         Reason code from the latest attempt; `None` while pending or running.
     restartable:
         Whether `retry` may create a new attempt.
+    hostname:
+        Hostname of the node where the most recent attempt ran; `None` until
+        the runner starts.
     """
 
     state: RunState
     current_attempt: Optional[str] = None
     reason: Optional[FailureReason] = None
     restartable: bool = False
+    hostname: Optional[str] = None
 
     def to_dict(self) -> dict:
         """Serialize to a plain dict suitable for JSON output."""
@@ -174,6 +178,7 @@ class MainStatus:
             current_attempt=d.get("current_attempt"),
             reason=FailureReason(d["reason"]) if d.get("reason") else None,
             restartable=d.get("restartable", False),
+            hostname=d.get("hostname"),
         )
 
 
