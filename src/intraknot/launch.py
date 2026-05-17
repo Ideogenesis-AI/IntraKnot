@@ -26,7 +26,7 @@ import importlib.resources
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -564,10 +564,10 @@ def create_campaign(
     else:
         write_slurm_toml(slurm_dest)
 
-    # runs.csv — parameter table (array_id column is optional; omit for now).
+    # runs.csv — three-column parameter table.
     with open(campaign_dir / "runs.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["run_id", "status"])
+        writer.writerow(["run_id", "scan_id", "status"])
 
     # notes.md — blank.
     (campaign_dir / "notes.md").write_text(f"# {campaign_id}\n\n")
@@ -593,6 +593,8 @@ def create_run(
     runs_root: Path,
     campaigns_root: Path,
     machine: Optional[MachineConfig] = None,
+    scan_id: str = "",
+    overrides: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Create a new run directory with all standard files and subdirectories.
 
@@ -600,6 +602,10 @@ def create_run(
     produce the run's `config.toml`. The `slurm.toml` is copied verbatim from
     the campaign directory; edit it before submitting to override Slurm
     resource settings for this specific run.
+
+    Exactly one of `config_src` and `overrides` should be provided. When both
+    are `None` the run is built from campaign defaults alone. When both are
+    non-`None` a `ValueError` is raised.
 
     Parameters
     ----------
@@ -611,7 +617,7 @@ def create_run(
     config_src:
         Path to a TOML file containing per-run overrides (typically at least
         `[model]`). Pass `None` to rely entirely on the campaign's
-        `defaults.toml`.
+        `defaults.toml` or `overrides`.
     runs_root:
         Parent directory where the run subdirectory is created.
     campaigns_root:
@@ -619,6 +625,14 @@ def create_run(
     machine:
         Machine config; used to record the machine name in `manifest.yaml`.
         Pass `None` when no machine config is available.
+    scan_id:
+        Optional scan identifier. When non-empty, recorded in the campaign's
+        `runs.csv` so that runs belonging to the same scan can be selected
+        together with `--scan`.
+    overrides:
+        In-memory override dict in the same nested structure as a parsed TOML
+        config (`{section: {key: value}}`). Takes precedence over `config_src`
+        when provided. Mutually exclusive with `config_src`.
 
     Returns
     -------
@@ -631,7 +645,12 @@ def create_run(
         If a run with `run_id` already exists.
     FileNotFoundError
         If `config_src` does not exist or the campaign directory is absent.
+    ValueError
+        If both `config_src` and `overrides` are provided.
     """
+    if config_src is not None and overrides is not None:
+        raise ValueError("Provide at most one of config_src and overrides.")
+
     run_dir = runs_root / run_id
     if run_dir.exists():
         raise FileExistsError(f"Run already exists: {run_dir}")
@@ -641,7 +660,10 @@ def create_run(
         raise FileNotFoundError(f"Campaign not found: {campaign_dir}")
 
     # Load and merge physics configs.
-    user_cfg = load_config(config_src) if config_src is not None else None
+    if overrides is not None:
+        user_cfg: Optional[Dict[str, Any]] = overrides
+    else:
+        user_cfg = load_config(config_src) if config_src is not None else None
     defaults = load_campaign_defaults(campaign_dir)
     merged_cfg = _merge_defaults(user_cfg, defaults)
 
@@ -691,7 +713,7 @@ def create_run(
     _copy_algorithm(runner, run_dir)
 
     # Register the run in the campaign's runs.csv.
-    _register_run_in_campaign(campaign_dir, run_id)
+    _register_run_in_campaign(campaign_dir, run_id, scan_id=scan_id)
 
     return run_dir
 
@@ -700,10 +722,16 @@ def create_run(
 # Campaign run registry helpers
 # ---------------------------------------------------------------------------
 
-def _register_run_in_campaign(campaign_dir: Path, run_id: str) -> None:
-    """Append a `run_id,pending` row to the campaign's `runs.csv`.
+def _register_run_in_campaign(
+    campaign_dir: Path,
+    run_id: str,
+    scan_id: str = "",
+) -> None:
+    """Append a row to the campaign's `runs.csv`.
 
-    Creates the file with a header row if it does not yet exist.
+    Creates the file with a three-column header if it does not yet exist.
+    When an existing file has only the legacy two-column header (`run_id`,
+    `status`), a two-column row is appended for backward compatibility.
 
     Parameters
     ----------
@@ -711,15 +739,32 @@ def _register_run_in_campaign(campaign_dir: Path, run_id: str) -> None:
         Campaign directory containing (or to receive) `runs.csv`.
     run_id:
         Run identifier to register.
+    scan_id:
+        Scan identifier to record in the `scan_id` column. Ignored when the
+        file uses the legacy two-column format.
     """
     runs_csv = campaign_dir / "runs.csv"
     if not runs_csv.exists():
         with open(runs_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "status"])
+            writer.writerow(["run_id", "scan_id", "status"])
+
+    # Detect the existing header to preserve backward compatibility.
+    with open(runs_csv, newline="") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            header = []
+
+    has_scan_id_col = "scan_id" in header
+
     with open(runs_csv, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([run_id, "pending"])
+        if has_scan_id_col:
+            writer.writerow([run_id, scan_id, "pending"])
+        else:
+            writer.writerow([run_id, "pending"])
 
 
 def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
@@ -758,6 +803,50 @@ def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
         writer.writeheader()
         writer.writerows(kept)
     return True
+
+
+def read_runs_by_filter(
+    campaign_dir: Path,
+    scan_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[str]:
+    """Return run IDs from `runs.csv` matching optional scan and status filters.
+
+    Parameters
+    ----------
+    campaign_dir:
+        Campaign directory containing `runs.csv`.
+    scan_id:
+        When given, only rows whose `scan_id` column equals this value are
+        returned. Ignored when the file uses the legacy two-column format.
+    status:
+        When given, only rows whose `status` column equals this value are
+        returned.
+
+    Returns
+    -------
+    list[str]
+        Ordered list of matching `run_id` values.
+    """
+    runs_csv = campaign_dir / "runs.csv"
+    if not runs_csv.exists():
+        return []
+
+    with open(runs_csv, newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+
+    matches: List[str] = []
+    for row in rows:
+        run_id = row.get("run_id", "").strip()
+        if not run_id:
+            continue
+        if scan_id is not None and row.get("scan_id", "").strip() != scan_id:
+            continue
+        if status is not None and row.get("status", "").strip() != status:
+            continue
+        matches.append(run_id)
+    return matches
 
 
 def delete_run(
