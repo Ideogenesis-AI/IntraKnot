@@ -570,12 +570,12 @@ def run_start(
     else:
         run_ids = [run_id]
 
-    any_error = False
+    error_code = 0
     for rid in run_ids:
         run_dir = Path(runs_root) / rid
         if not run_dir.exists():
             click.echo(f"Error: run directory not found: {run_dir}", err=True)
-            any_error = True
+            error_code = 1
             continue
         try:
             script = write_slurm_script(run_dir, machine, rid)
@@ -587,13 +587,13 @@ def run_start(
             subprocess.run(["sh", str(script)], check=True, env=env)
         except subprocess.CalledProcessError as e:
             click.echo(f"Script exited with status {e.returncode}.", err=True)
-            any_error = True
+            error_code = e.returncode
         except Exception as e:
             click.echo(f"Error: {e}", err=True)
-            any_error = True
+            error_code = 1
 
-    if any_error:
-        sys.exit(1)
+    if error_code:
+        sys.exit(error_code)
 
 
 @grp_run.command("submit")
