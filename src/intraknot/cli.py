@@ -966,6 +966,7 @@ def cmd_status(run_id: str, runs_root: str) -> None:
         click.echo(f"Current attempt : {s.current_attempt or '—'}")
         click.echo(f"Reason          : {s.reason.value if s.reason else '—'}")
         click.echo(f"Restartable     : {s.restartable}")
+        click.echo(f"Hostname        : {s.hostname or '—'}")
 
         # Also show summary observables if available.
         obs_path = run_dir / "summary" / "observables.json"
