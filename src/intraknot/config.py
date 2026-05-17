@@ -39,10 +39,11 @@ File format dispatch: `.toml` files are loaded with stdlib `tomllib`;
 
 from __future__ import annotations
 
+import itertools
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
 
@@ -451,6 +452,232 @@ def write_data_gitignore(directory: Path) -> None:
     """
     directory.mkdir(parents=True, exist_ok=True)
     (directory / ".gitignore").write_text(_GITIGNORE_CONTENT)
+
+
+def _format_value(v: Any) -> str:
+    """Format a scalar config value for use in a run ID.
+
+    Floats are rendered with Python's `g`-format to suppress trailing zeros.
+    All other types are converted with `str`.
+
+    Parameters
+    ----------
+    v:
+        Scalar value (int, float, bool, or str).
+
+    Returns
+    -------
+    str
+        Human-readable, filesystem-safe representation.
+    """
+    if isinstance(v, float):
+        return f"{v:g}"
+    return str(v)
+
+
+def _infer_typed_value(raw: str, reference: Any) -> Any:
+    """Parse `raw` into the same Python type as `reference`.
+
+    Parameters
+    ----------
+    raw:
+        Raw string from a `--set` argument value.
+    reference:
+        The existing default value for this key, used to determine the target
+        type.
+
+    Returns
+    -------
+    Any
+        Parsed value with the same type as `reference`.
+
+    Raises
+    ------
+    ValueError
+        When `raw` cannot be converted to the type of `reference`.
+    """
+    if isinstance(reference, bool):
+        if raw.lower() in ("true", "1", "yes"):
+            return True
+        if raw.lower() in ("false", "0", "no"):
+            return False
+        raise ValueError(f"Cannot parse {raw!r} as bool")
+    if isinstance(reference, int):
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"Cannot parse {raw!r} as int")
+    if isinstance(reference, float):
+        try:
+            return float(raw)
+        except ValueError:
+            raise ValueError(f"Cannot parse {raw!r} as float")
+    # str or unknown: return as-is
+    return raw
+
+
+def _parse_one_set_arg(
+    arg: str,
+    defaults: Dict[str, Any],
+) -> Tuple[str, str, List[Any]]:
+    """Parse a single `--set` argument string.
+
+    Parameters
+    ----------
+    arg:
+        A string of the form `"section.key=value"` or
+        `"section.key=v1,v2,v3"`.
+    defaults:
+        Campaign defaults dict, used for type inference.
+
+    Returns
+    -------
+    tuple[str, str, list]
+        `(section, key, [typed_value, ...])` — always a list, length >= 1.
+
+    Raises
+    ------
+    ValueError
+        For malformed arguments or unknown keys.
+    """
+    if "=" not in arg:
+        raise ValueError(
+            f"Invalid --set argument {arg!r}: expected 'section.key=value'."
+        )
+    lhs, rhs = arg.split("=", 1)
+    parts = lhs.split(".")
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid --set key {lhs!r}: expected 'section.key' (exactly one dot)."
+        )
+    section, key = parts
+
+    # Look up the default for type inference.
+    section_defaults = defaults.get(section, {})
+    if key not in section_defaults:
+        raise ValueError(
+            f"Unknown key {lhs!r}: not found in campaign defaults."
+        )
+    reference = section_defaults[key]
+
+    raw_values = rhs.split(",")
+    typed_values = [_infer_typed_value(v.strip(), reference) for v in raw_values]
+    return section, key, typed_values
+
+
+def parse_set_overrides(
+    set_args: List[str],
+    defaults: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    """Parse a list of `--set section.key=value` strings into a config dict.
+
+    Only accepts single-valued arguments (no comma-separated lists). Use
+    `iter_scan_combinations` when multi-valued arguments are present.
+
+    Parameters
+    ----------
+    set_args:
+        List of strings of the form `"section.key=value"`.
+    defaults:
+        Campaign defaults dict, used for type inference and key validation.
+
+    Returns
+    -------
+    dict
+        Nested `{section: {key: typed_value}}` suitable for passing to
+        `_merge_defaults` as the `user_cfg` argument.
+
+    Raises
+    ------
+    ValueError
+        For malformed arguments, unknown keys, or multi-valued entries.
+    """
+    overrides: Dict[str, Dict[str, Any]] = {}
+    for arg in set_args:
+        section, key, values = _parse_one_set_arg(arg, defaults)
+        if len(values) > 1:
+            raise ValueError(
+                f"--set {arg!r} contains multiple values. "
+                "Use iter_scan_combinations for multi-valued arguments."
+            )
+        overrides.setdefault(section, {})[key] = values[0]
+    return overrides
+
+
+def iter_scan_combinations(
+    set_args: List[str],
+    defaults: Dict[str, Any],
+) -> Iterator[Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]]:
+    """Yield one override dict per combination of `--set` argument values.
+
+    When all `--set` arguments have exactly one value this yields a single
+    item. When any argument has comma-separated values (e.g.
+    `"algorithm.max_bond=64,128,256"`) the cartesian product over all
+    multi-valued arguments is produced.
+
+    Parameters
+    ----------
+    set_args:
+        List of strings of the form `"section.key=value"` or
+        `"section.key=v1,v2,v3"`.
+    defaults:
+        Campaign defaults dict, used for type inference and key validation.
+
+    Yields
+    ------
+    tuple[dict, dict]
+        `(nested_overrides, flat_overrides)` where `nested_overrides` is
+        `{section: {key: value}}` (suitable for `_merge_defaults`) and
+        `flat_overrides` is `{leafkey: value}` (suitable for `make_run_id`).
+
+    Raises
+    ------
+    ValueError
+        For malformed arguments or unknown keys.
+    """
+    parsed: List[Tuple[str, str, List[Any]]] = [
+        _parse_one_set_arg(arg, defaults) for arg in set_args
+    ]
+
+    # Build the list of (section, key) axes and their value lists for the
+    # cartesian product.
+    keys: List[Tuple[str, str]] = [(s, k) for s, k, _ in parsed]
+    value_lists: List[List[Any]] = [vs for _, _, vs in parsed]
+
+    for combo in itertools.product(*value_lists):
+        nested: Dict[str, Dict[str, Any]] = {}
+        flat: Dict[str, Any] = {}
+        for (section, key), value in zip(keys, combo):
+            nested.setdefault(section, {})[key] = value
+            flat[key] = value
+        yield nested, flat
+
+
+def make_run_id(campaign_id: str, flat_overrides: Dict[str, Any]) -> str:
+    """Build an auto-generated run identifier from campaign name and overrides.
+
+    Keys are sorted alphabetically. Floats are formatted with Python's
+    `g`-format. The separator between key and value is `=`; pairs are
+    joined by `_`.
+
+    Parameters
+    ----------
+    campaign_id:
+        Campaign identifier (e.g. `"test_heisenberg_dmrg"`).
+    flat_overrides:
+        `{leafkey: value}` mapping of the overridden parameters.
+
+    Returns
+    -------
+    str
+        Run ID such as `"test_heisenberg_dmrg_lx=40_max_bond=128"`.
+    """
+    if not flat_overrides:
+        return campaign_id
+    pairs = "_".join(
+        f"{k}={_format_value(v)}" for k, v in sorted(flat_overrides.items())
+    )
+    return f"{campaign_id}_{pairs}"
 
 
 def _merge_defaults(
