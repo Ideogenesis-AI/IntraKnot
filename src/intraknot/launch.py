@@ -759,6 +759,15 @@ def _register_run_in_campaign(
 
     has_scan_id_col = "scan_id" in header
 
+    # Guard against duplicate entries: read existing run_ids and skip if
+    # this run_id is already registered.
+    with open(runs_csv, newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)  # skip header
+        existing_ids = {row[0] for row in reader if row}
+    if run_id in existing_ids:
+        return
+
     with open(runs_csv, "a", newline="") as f:
         writer = csv.writer(f)
         if has_scan_id_col:
