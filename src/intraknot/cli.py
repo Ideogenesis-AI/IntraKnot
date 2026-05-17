@@ -49,7 +49,10 @@ import yaml
 from .collect import collect_campaign, collect_run
 from .config import (
     MachineConfig,
+    iter_scan_combinations,
+    load_campaign_defaults,
     load_machine_config,
+    make_run_id,
     write_data_gitignore,
     write_machines_yaml,
     write_paths_toml,
@@ -61,6 +64,7 @@ from .launch import (
     create_run,
     delete_run,
     prepare_exec,
+    read_runs_by_filter,
     remove_run_from_campaign,
     submit_exec_job,
     submit_job,
@@ -342,11 +346,20 @@ def grp_run() -> None:
 
 
 @grp_run.command("create")
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
 @click.option("--config", "config_src", default=None, type=click.Path(),
               help="Path to a per-run config.toml with overrides. "
                    "Falls back to config.toml in the current directory, "
-                   "then to the campaign defaults.toml alone.")
+                   "then to the campaign defaults.toml alone. "
+                   "Mutually exclusive with --set.")
+@click.option("--set", "set_args", multiple=True, metavar="SECTION.KEY=VALUE",
+              help="Override a campaign default. Format: section.key=value. "
+                   "Comma-separate values for a scan (e.g. algorithm.max_bond=64,128,256). "
+                   "Mutually exclusive with RUN_ID and --config. "
+                   "Repeatable.")
+@click.option("--scan", "scan_id", default=None, metavar="SCAN_ID",
+              help="Tag all created runs with this scan identifier. "
+                   "Required when any --set value contains multiple entries.")
 @click.option("--campaign", "campaign_id", default=None,
               help="Campaign ID. Defaults to the active campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
@@ -354,14 +367,33 @@ def grp_run() -> None:
 @click.option("--machine", "machine_opt", default=None,
               help="Path to configs/ directory. Defaults to ./configs.")
 def run_create(
-    run_id: str,
+    run_id: Optional[str],
     config_src: Optional[str],
+    set_args: tuple,
+    scan_id: Optional[str],
     campaign_id: Optional[str],
     campaigns_root: str,
     runs_root: str,
     machine_opt: Optional[str],
 ) -> None:
-    """Create a new run directory."""
+    """Create a new run directory.
+
+    There are two modes of operation:
+
+    \b
+    1. Explicit name (legacy):
+         iknot run create chi128
+         iknot run create chi128 --config overrides.toml
+
+    \b
+    2. Auto-named from --set overrides:
+         iknot run create --set algorithm.max_bond=128 --set geometry.lx=40
+         iknot run create --scan chi_study --set algorithm.max_bond=64,128,256
+
+    In mode 2 the run ID is derived from the campaign name and the overridden
+    keys. When any --set value is comma-separated, one run is created per
+    value combination (cartesian product) and --scan is required.
+    """
     if campaign_id is None:
         campaign_id, _ = _resolve_active_campaign()
     if campaign_id is None:
@@ -372,84 +404,277 @@ def run_create(
         )
         sys.exit(1)
 
-    # Resolve config path: explicit → CWD default → None (campaign defaults only).
-    if config_src is not None:
-        config_path: Optional[Path] = Path(config_src)
-        if not config_path.exists():
-            click.echo(f"Error: config file not found: {config_path}", err=True)
-            sys.exit(1)
-    else:
-        cwd_default = Path.cwd() / "config.toml"
-        config_path = cwd_default if cwd_default.exists() else None
+    using_set = bool(set_args)
+
+    # Mutual exclusion checks.
+    if run_id is not None and using_set:
+        click.echo(
+            "Error: RUN_ID and --set are mutually exclusive. "
+            "Provide either a positional run ID or --set overrides, not both.",
+            err=True,
+        )
+        sys.exit(1)
+    if run_id is not None and config_src is not None and using_set:
+        # --config with --set is also excluded (caught above), but keep guard.
+        pass
+    if not run_id and not using_set:
+        click.echo(
+            "Error: provide either a RUN_ID or at least one --set override.",
+            err=True,
+        )
+        sys.exit(1)
+    if using_set and config_src is not None:
+        click.echo(
+            "Error: --config and --set are mutually exclusive.",
+            err=True,
+        )
+        sys.exit(1)
 
     machine = _load_machine(machine_opt)
-    try:
-        run_dir = create_run(
-            run_id=run_id,
-            campaign_id=campaign_id,
-            config_src=config_path,
-            runs_root=Path(runs_root),
-            campaigns_root=Path(campaigns_root),
-            machine=machine,
-        )
-        click.echo(f"Created run: {run_dir}")
-    except (FileExistsError, FileNotFoundError) as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+
+    if using_set:
+        # Auto-naming mode: use --set overrides to build config and run ID.
+        campaigns_root_path = Path(campaigns_root)
+        campaign_dir = campaigns_root_path / campaign_id
+        defaults = load_campaign_defaults(campaign_dir)
+
+        # Check if any --set arg has multiple values (scan mode).
+        is_scan = any("," in arg.split("=", 1)[1] for arg in set_args if "=" in arg)
+        if is_scan and scan_id is None:
+            click.echo(
+                "Error: --scan SCAN_ID is required when any --set value "
+                "contains multiple comma-separated entries.",
+                err=True,
+            )
+            sys.exit(1)
+
+        try:
+            combinations = list(iter_scan_combinations(list(set_args), defaults))
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+        any_error = False
+        for nested_overrides, flat_overrides in combinations:
+            generated_id = make_run_id(campaign_id, flat_overrides)
+            try:
+                run_dir = create_run(
+                    run_id=generated_id,
+                    campaign_id=campaign_id,
+                    config_src=None,
+                    runs_root=Path(runs_root),
+                    campaigns_root=campaigns_root_path,
+                    machine=machine,
+                    scan_id=scan_id or "",
+                    overrides=nested_overrides,
+                )
+                click.echo(f"Created run: {run_dir}")
+            except (FileExistsError, FileNotFoundError, ValueError) as e:
+                click.echo(f"Error: {e}", err=True)
+                any_error = True
+
+        if any_error:
+            sys.exit(1)
+
+    else:
+        # Explicit-name mode (legacy behaviour).
+        if config_src is not None:
+            config_path: Optional[Path] = Path(config_src)
+            if not config_path.exists():
+                click.echo(f"Error: config file not found: {config_path}", err=True)
+                sys.exit(1)
+        else:
+            cwd_default = Path.cwd() / "config.toml"
+            config_path = cwd_default if cwd_default.exists() else None
+
+        try:
+            run_dir = create_run(
+                run_id=run_id,
+                campaign_id=campaign_id,
+                config_src=config_path,
+                runs_root=Path(runs_root),
+                campaigns_root=Path(campaigns_root),
+                machine=machine,
+            )
+            click.echo(f"Created run: {run_dir}")
+        except (FileExistsError, FileNotFoundError) as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
 
 
 @grp_run.command("start")
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
+@click.option("--scan", "scan_id", default=None, metavar="SCAN_ID",
+              help="Start all runs belonging to this scan ID. "
+                   "Mutually exclusive with RUN_ID.")
+@click.option("--status", "status_filter", default=None, metavar="STATUS",
+              help="When --scan is given, restrict to runs with this status "
+                   "(e.g. 'pending', 'failed').")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Required when --scan is used and no campaign "
+                   "is active. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None,
               help="Path to machine configs/ directory. Defaults to ./configs.")
-def run_start(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
+def run_start(
+    run_id: Optional[str],
+    scan_id: Optional[str],
+    status_filter: Optional[str],
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+) -> None:
     """Write a Slurm script and execute it directly with bash (no sbatch).
 
     Equivalent to `submit`, but runs in the foreground on the local machine.
     Useful when Slurm is not available, e.g. on a workstation or during
     interactive testing. `SLURM_JOB_ID` and `SLURM_NODELIST` are stubbed
     automatically so the script runs without a Slurm daemon.
+
+    Provide either a positional RUN_ID to start a single run, or --scan to
+    start all runs (optionally filtered by --status) belonging to a scan.
     """
-    machine = _load_machine(machine_opt)
-    run_dir = Path(runs_root) / run_id
-    if not run_dir.exists():
-        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+    if run_id is not None and scan_id is not None:
+        click.echo("Error: RUN_ID and --scan are mutually exclusive.", err=True)
         sys.exit(1)
-    try:
-        script = write_slurm_script(run_dir, machine, run_id)
-        click.echo(f"Wrote Slurm script: {script}")
-        click.echo(f"Starting run: {run_dir}")
-        env = os.environ.copy()
-        env.setdefault("SLURM_JOB_ID", "local")
-        env.setdefault("SLURM_NODELIST", "localhost")
-        subprocess.run(["sh", str(script)], check=True, env=env)
-    except subprocess.CalledProcessError as e:
-        click.echo(f"Script exited with status {e.returncode}.", err=True)
-        sys.exit(e.returncode)
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+    if run_id is None and scan_id is None:
+        click.echo(
+            "Error: provide either a RUN_ID or --scan SCAN_ID.", err=True
+        )
+        sys.exit(1)
+
+    machine = _load_machine(machine_opt)
+
+    # Resolve the list of run IDs to start.
+    if scan_id is not None:
+        if campaign_id is None:
+            campaign_id, _ = _resolve_active_campaign()
+        if campaign_id is None:
+            click.echo(
+                "Error: --scan requires a campaign. "
+                "Use --campaign or `iknot campaign activate <id>`.",
+                err=True,
+            )
+            sys.exit(1)
+        campaign_dir = Path(campaigns_root) / campaign_id
+        run_ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
+        if not run_ids:
+            click.echo(
+                f"No runs found for scan '{scan_id}'"
+                + (f" with status '{status_filter}'" if status_filter else "")
+                + "."
+            )
+            return
+    else:
+        run_ids = [run_id]
+
+    any_error = False
+    for rid in run_ids:
+        run_dir = Path(runs_root) / rid
+        if not run_dir.exists():
+            click.echo(f"Error: run directory not found: {run_dir}", err=True)
+            any_error = True
+            continue
+        try:
+            script = write_slurm_script(run_dir, machine, rid)
+            click.echo(f"Wrote Slurm script: {script}")
+            click.echo(f"Starting run: {run_dir}")
+            env = os.environ.copy()
+            env.setdefault("SLURM_JOB_ID", "local")
+            env.setdefault("SLURM_NODELIST", "localhost")
+            subprocess.run(["sh", str(script)], check=True, env=env)
+        except subprocess.CalledProcessError as e:
+            click.echo(f"Script exited with status {e.returncode}.", err=True)
+            any_error = True
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+            any_error = True
+
+    if any_error:
         sys.exit(1)
 
 
 @grp_run.command("submit")
-@click.argument("run_id")
+@click.argument("run_id", required=False, default=None)
+@click.option("--scan", "scan_id", default=None, metavar="SCAN_ID",
+              help="Submit all runs belonging to this scan ID. "
+                   "Mutually exclusive with RUN_ID.")
+@click.option("--status", "status_filter", default=None, metavar="STATUS",
+              help="When --scan is given, restrict to runs with this status "
+                   "(e.g. 'pending', 'failed').")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Required when --scan is used and no campaign "
+                   "is active. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--machine", "machine_opt", default=None)
-def run_submit(run_id: str, runs_root: str, machine_opt: Optional[str]) -> None:
-    """Write a Slurm script and submit it for a run."""
-    machine = _load_machine(machine_opt)
-    run_dir = Path(runs_root) / run_id
-    if not run_dir.exists():
-        click.echo(f"Error: run directory not found: {run_dir}", err=True)
+def run_submit(
+    run_id: Optional[str],
+    scan_id: Optional[str],
+    status_filter: Optional[str],
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+) -> None:
+    """Write a Slurm script and submit it to the Slurm scheduler.
+
+    Provide either a positional RUN_ID to submit a single run, or --scan to
+    submit all runs (optionally filtered by --status) belonging to a scan.
+    """
+    if run_id is not None and scan_id is not None:
+        click.echo("Error: RUN_ID and --scan are mutually exclusive.", err=True)
         sys.exit(1)
-    try:
-        script = write_slurm_script(run_dir, machine, run_id)
-        click.echo(f"Wrote Slurm script: {script}")
-        job_id = submit_job(run_dir)
-        click.echo(f"Submitted job: {job_id}")
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+    if run_id is None and scan_id is None:
+        click.echo(
+            "Error: provide either a RUN_ID or --scan SCAN_ID.", err=True
+        )
+        sys.exit(1)
+
+    machine = _load_machine(machine_opt)
+
+    # Resolve the list of run IDs to submit.
+    if scan_id is not None:
+        if campaign_id is None:
+            campaign_id, _ = _resolve_active_campaign()
+        if campaign_id is None:
+            click.echo(
+                "Error: --scan requires a campaign. "
+                "Use --campaign or `iknot campaign activate <id>`.",
+                err=True,
+            )
+            sys.exit(1)
+        campaign_dir = Path(campaigns_root) / campaign_id
+        run_ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
+        if not run_ids:
+            click.echo(
+                f"No runs found for scan '{scan_id}'"
+                + (f" with status '{status_filter}'" if status_filter else "")
+                + "."
+            )
+            return
+    else:
+        run_ids = [run_id]
+
+    any_error = False
+    for rid in run_ids:
+        run_dir = Path(runs_root) / rid
+        if not run_dir.exists():
+            click.echo(f"Error: run directory not found: {run_dir}", err=True)
+            any_error = True
+            continue
+        try:
+            script = write_slurm_script(run_dir, machine, rid)
+            click.echo(f"Wrote Slurm script: {script}")
+            job_id = submit_job(run_dir)
+            click.echo(f"Submitted job: {job_id}")
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+            any_error = True
+
+    if any_error:
         sys.exit(1)
 
 
