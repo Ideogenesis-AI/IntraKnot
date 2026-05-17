@@ -88,6 +88,7 @@ import datetime
 import json
 import logging
 import math
+import socket
 import sys
 import tomllib
 from pathlib import Path
@@ -458,7 +459,7 @@ def run(run_dir: Path) -> None:
 
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # Mark main as running.
+    # Mark main as running, recording which node is executing the attempt.
     main_status_path = run_dir / "main" / "status.json"
     write_status(
         main_status_path,
@@ -466,6 +467,7 @@ def run(run_dir: Path) -> None:
             state=RunState.RUNNING,
             current_attempt=attempt_name,
             restartable=False,
+            hostname=socket.gethostname(),
         ),
     )
 
@@ -559,7 +561,7 @@ def run(run_dir: Path) -> None:
         ),
     )
 
-    # Update main status.
+    # Update main status, preserving the hostname recorded at start.
     write_status(
         main_status_path,
         MainStatus(
@@ -567,6 +569,7 @@ def run(run_dir: Path) -> None:
             current_attempt=attempt_name,
             reason=end_reason,
             restartable=restartable,
+            hostname=socket.gethostname(),
         ),
     )
 
