@@ -96,7 +96,7 @@ class TestRenderSlurmHeader:
 # ---------------------------------------------------------------------------
 
 def _make_machine() -> MachineConfig:
-    return MachineConfig(paths=PathsConfig(python="uv run"))
+    return MachineConfig(paths=PathsConfig(command="uv run"))
 
 
 def _write_slurm_toml(run_dir: Path, **overrides) -> None:

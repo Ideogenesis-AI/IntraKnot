@@ -154,7 +154,7 @@ class TestRunStart:
 
     def _machine(self):
         from intraknot.config import MachineConfig, PathsConfig
-        return MachineConfig(paths=PathsConfig(python="python"))
+        return MachineConfig(paths=PathsConfig(command="python"))
 
     def test_invokes_slurm_script_directly(self, tmp_path):
         self._make_run_dir(tmp_path)

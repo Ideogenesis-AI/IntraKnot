@@ -36,7 +36,7 @@ from intraknot.status import (
 
 
 def _make_machine() -> MachineConfig:
-    return MachineConfig(paths=PathsConfig(python="uv run"))
+    return MachineConfig(paths=PathsConfig(command="uv run"))
 
 
 def _make_run_dir(

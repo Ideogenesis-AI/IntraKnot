@@ -132,10 +132,10 @@ class TestLoadSlurmToml:
 class TestLoadMachineConfig:
     def _write_paths(self, d, **kwargs):
         defaults = dict(
-            run_root="/scratch/runs",
+            project_root="/scratch/runs",
             scratch_root="/scratch",
-            node_local_scratch="/tmp/$USER",
-            python="uv run",
+            scratch_node="/tmp/$USER",
+            command="uv run",
         )
         defaults.update(kwargs)
         (d / "paths.toml").write_text(
@@ -146,13 +146,13 @@ class TestLoadMachineConfig:
     def test_reads_paths(self, tmp_path):
         self._write_paths(tmp_path)
         mc = load_machine_config(tmp_path)
-        assert mc.paths.run_root == "/scratch/runs"
-        assert mc.paths.python == "uv run"
+        assert mc.paths.project_root == "/scratch/runs"
+        assert mc.paths.command == "uv run"
 
     def test_missing_files_give_defaults(self, tmp_path):
         mc = load_machine_config(tmp_path)
         assert isinstance(mc, MachineConfig)
-        assert mc.paths.python == "uv run"
+        assert mc.paths.command == "uv run"
 
     def test_no_slurm_field_on_machine_config(self, tmp_path):
         mc = load_machine_config(tmp_path)
