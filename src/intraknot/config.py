@@ -131,21 +131,21 @@ class PathsConfig:
 
     Parameters
     ----------
-    run_root:
+    project_root:
         Root directory where run subdirectories are created.
     scratch_root:
         Fast scratch filesystem root (used by jobs for temporary data).
-    node_local_scratch:
+    scratch_node:
         Per-node local scratch (typically `/tmp/$USER`).
-    python:
+    command:
         Command used to invoke the runner script from Slurm.
         Defaults to `"uv run"`.
     """
 
-    run_root: str = ""
+    project_root: str = ""
     scratch_root: str = ""
-    node_local_scratch: str = "/tmp/$USER"
-    python: str = "uv run"
+    scratch_node: str = "/tmp/$USER"
+    command: str = "uv run"
 
 
 @dataclass
@@ -275,10 +275,10 @@ def load_machine_config(configs_dir: Path) -> MachineConfig:
     if paths_path.exists():
         raw = load_config(paths_path).get("paths", {})
         paths_cfg = PathsConfig(
-            run_root=raw.get("run_root", paths_cfg.run_root),
+            project_root=raw.get("project_root", paths_cfg.project_root),
             scratch_root=raw.get("scratch_root", paths_cfg.scratch_root),
-            node_local_scratch=raw.get("node_local_scratch", paths_cfg.node_local_scratch),
-            python=raw.get("python", paths_cfg.python),
+            scratch_node=raw.get("scratch_node", paths_cfg.scratch_node),
+            command=raw.get("command", paths_cfg.command),
         )
 
     return MachineConfig(paths=paths_cfg)
@@ -394,10 +394,10 @@ _PATHS_TOML_TEMPLATE = """\
 # Filesystem path settings. Fill in the paths for your cluster.
 
 [paths]
-run_root           = ""          # Root directory for run subdirectories
-scratch_root       = ""          # Fast scratch filesystem root
-node_local_scratch = "/tmp/$USER"  # Per-node local scratch
-python             = "uv run"    # Command used to invoke the runner script
+project_root = ""           # Root directory for run subdirectories
+scratch_root = ""           # Fast scratch filesystem root
+scratch_node = "/tmp/$USER" # Per-node local scratch
+command      = "uv run"     # Command used to invoke the runner script
 """
 
 _GITIGNORE_CONTENT = "*\n"
