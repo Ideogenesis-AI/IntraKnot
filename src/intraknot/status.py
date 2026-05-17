@@ -79,6 +79,9 @@ RETRYABLE_REASONS: frozenset[FailureReason] = frozenset({
     FailureReason.OUT_OF_MEMORY,
     FailureReason.SCHEDULER_FAILURE,
     FailureReason.CHECKPOINT_MISSING,
+    # NOT_CONVERGED is retryable: the run can continue sweeping from its last
+    # checkpoint until convergence is reached.
+    FailureReason.NOT_CONVERGED,
 })
 
 
