@@ -691,7 +691,6 @@ def create_run(
         "campaign": campaign_id,
         "algorithm": algorithm,
         "created_at": datetime.date.today().isoformat(),
-        "machine": machine.paths.project_root if machine else "",
     }
     (run_dir / "manifest.yaml").write_text(
         yaml.dump(manifest, default_flow_style=False, sort_keys=False)
