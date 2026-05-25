@@ -25,6 +25,7 @@ import datetime
 import importlib.resources
 import shutil
 import subprocess
+import uuid as _uuid_lib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -595,6 +596,7 @@ def create_run(
     machine: Optional[MachineConfig] = None,
     scan_id: str = "",
     overrides: Optional[Dict[str, Any]] = None,
+    run_uuid: Optional[_uuid_lib.UUID] = None,
 ) -> Path:
     """Create a new run directory with all standard files and subdirectories.
 
@@ -623,8 +625,7 @@ def create_run(
     campaigns_root:
         Parent directory containing campaign subdirectories.
     machine:
-        Machine config; used to record the machine name in `manifest.yaml`.
-        Pass `None` when no machine config is available.
+        Unused; kept for call-site compatibility. Pass `None`.
     scan_id:
         Optional scan identifier. When non-empty, recorded in the campaign's
         `runs.csv` so that runs belonging to the same scan can be selected
@@ -633,6 +634,10 @@ def create_run(
         In-memory override dict in the same nested structure as a parsed TOML
         config (`{section: {key: value}}`). Takes precedence over `config_src`
         when provided. Mutually exclusive with `config_src`.
+    run_uuid:
+        UUID for this run. When `None`, a new UUID4 is generated. The full
+        UUID is stored in `manifest.yaml`; the auto-name caller is responsible
+        for deriving `uuid8` from this value before calling `make_run_id`.
 
     Returns
     -------
@@ -686,9 +691,11 @@ def create_run(
     # manifest.yaml — identity record (YAML).
     campaign_yaml = load_config(campaign_dir / "campaign.yaml")
     algorithm = campaign_yaml.get("algorithm", "dmrg")
+    if run_uuid is None:
+        run_uuid = _uuid_lib.uuid4()
     manifest = {
         "run_id": run_id,
-        "campaign": campaign_id,
+        "uuid": str(run_uuid),
         "algorithm": algorithm,
         "created_at": datetime.date.today().isoformat(),
     }
@@ -812,6 +819,37 @@ def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
     return True
 
 
+def remove_run_from_all_campaigns(campaigns_root: Path, run_id: str) -> List[str]:
+    """Remove a run from every campaign's `runs.csv` under `campaigns_root`.
+
+    Scans all subdirectories of `campaigns_root` and calls
+    `remove_run_from_campaign` on each one that is a directory.  Subdirectories
+    that do not contain a `runs.csv`, or whose CSV does not list `run_id`, are
+    silently skipped.
+
+    Parameters
+    ----------
+    campaigns_root:
+        Parent directory whose subdirectories are the campaign directories.
+    run_id:
+        Run identifier to remove from every registry found.
+
+    Returns
+    -------
+    list[str]
+        Names of campaign directories from which the run was removed, in
+        sorted order.
+    """
+    removed_from: List[str] = []
+    if not campaigns_root.exists():
+        return removed_from
+    for d in sorted(campaigns_root.iterdir()):
+        if d.is_dir():
+            if remove_run_from_campaign(d, run_id):
+                removed_from.append(d.name)
+    return removed_from
+
+
 def read_runs_by_filter(
     campaign_dir: Path,
     scan_id: Optional[str] = None,
@@ -861,28 +899,35 @@ def delete_run(
     campaign_dir: Optional[Path] = None,
     *,
     delete_dir: bool = False,
+    campaigns_root: Optional[Path] = None,
 ) -> bool:
-    """Deregister a run from its campaign and optionally delete the directory.
+    """Deregister a run from its campaign(s) and optionally delete the directory.
 
-    Removes the run's row from `campaigns/<id>/runs.csv`. When `delete_dir`
-    is `True`, the entire run directory tree is also removed from disk.
+    When `delete_dir` is `True` and `campaigns_root` is given, the run is
+    removed from every campaign's `runs.csv` before the directory is deleted.
+    When `delete_dir` is `False` (or `campaigns_root` is not given), only the
+    single `campaign_dir` registry is updated.
 
     Parameters
     ----------
     run_dir:
         Root of the run directory.
     campaign_dir:
-        Campaign directory whose `runs.csv` to update. Pass `None` to skip
-        the CSV update (e.g. when the campaign is not known).
+        Campaign directory whose `runs.csv` to update. Used only when
+        `campaigns_root` is not given. Pass `None` to skip the CSV update.
     delete_dir:
         If `True`, delete `run_dir` from disk after deregistering.
+    campaigns_root:
+        When given together with `delete_dir=True`, all campaigns under this
+        directory are scanned and the run is removed from each one. Takes
+        precedence over `campaign_dir` in that case.
 
     Returns
     -------
     bool
-        `True` if the run was found and removed from `runs.csv`, or if no
-        campaign directory was supplied. `False` when a campaign directory was
-        supplied but `run_id` was absent from `runs.csv`.
+        `True` if the run was found and removed from at least one `runs.csv`,
+        or if no campaign arguments were supplied. `False` when a
+        `campaign_dir` was supplied but `run_id` was absent from its CSV.
 
     Raises
     ------
@@ -893,9 +938,14 @@ def delete_run(
         raise FileNotFoundError(f"Run directory not found: {run_dir}")
 
     run_id = run_dir.name
-    removed = True
-    if campaign_dir is not None and campaign_dir.exists():
+    if delete_dir and campaigns_root is not None:
+        # N:M case: sweep all campaigns before removing the directory.
+        cleaned = remove_run_from_all_campaigns(campaigns_root, run_id)
+        removed = bool(cleaned)
+    elif campaign_dir is not None and campaign_dir.exists():
         removed = remove_run_from_campaign(campaign_dir, run_id)
+    else:
+        removed = True
 
     if delete_dir:
         shutil.rmtree(run_dir)
