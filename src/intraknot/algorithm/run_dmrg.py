@@ -70,10 +70,10 @@ dmrg.ckpt
 state.ckpt
     Final canonical state file; written by IntraKnot on successful
     completion using `summary.save`.
-observables.json
+info.json
     Key scalar results: energy, energy_per_site, converged, n_sweeps,
     max_bond_dim.
-convergence.csv
+conv.csv
     Per-sweep diagnostics: sweep, energy, delta_energy, discarded_weight,
     converged.
 status.json
@@ -351,7 +351,7 @@ def _write_observables(
     summary: dmrg.Summary,
     L: int,
 ) -> None:
-    """Write `observables.json` to the attempt directory.
+    """Write `info.json` to the attempt directory.
 
     Parameters
     ----------
@@ -370,13 +370,13 @@ def _write_observables(
         "max_bond_dim": max(summary.bond_dims) if summary.bond_dims else 0,
         "bond_dims": summary.bond_dims,
     }
-    (attempt_dir / "observables.json").write_text(
+    (attempt_dir / "info.json").write_text(
         json.dumps(obs, indent=2) + "\n"
     )
 
 
 def _write_convergence(attempt_dir: Path, summary: dmrg.Summary) -> None:
-    """Write `convergence.csv` to the attempt directory.
+    """Write `conv.csv` to the attempt directory.
 
     Parameters
     ----------
@@ -385,7 +385,7 @@ def _write_convergence(attempt_dir: Path, summary: dmrg.Summary) -> None:
     summary:
         Completed DMRG summary.
     """
-    path = attempt_dir / "convergence.csv"
+    path = attempt_dir / "conv.csv"
     energies: List[float] = summary.energies
     dw: List[float] = summary.discarded_weights
 

@@ -21,7 +21,7 @@
 This subpackage contains standalone runner scripts that are copied into
 campaign and run directories and executed directly by Slurm. Each runner
 reads `config.toml` from the run directory, runs the algorithm, and writes
-outputs (`state.ckpt`, `observables.json`, `convergence.csv`, `status.json`).
+outputs (`state.ckpt`, `info.json`, `conv.csv`, `status.json`).
 
 Available runners
 -----------------
