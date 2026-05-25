@@ -70,8 +70,8 @@ def _current_attempt_dir(run_dir: Path) -> Optional[Path]:
 def collect_run(run_dir: Path) -> dict:
     """Collect status and observables from a run directory into `summary/`.
 
-    Reads `main/status.json` and `main/current/observables.json`, then writes
-    compact copies to `summary/status.json` and `summary/observables.json`.
+    Reads `main/status.json` and `main/current/info.json`, then writes
+    compact copies to `summary/status.json` and `summary/info.json`.
     All fields that cannot be read are reported as `null`.
 
     Parameters
@@ -100,7 +100,7 @@ def collect_run(run_dir: Path) -> dict:
     obs: dict = {}
     attempt_dir = _current_attempt_dir(run_dir)
     if attempt_dir is not None:
-        obs = _read_json(attempt_dir / "observables.json") or {}
+        obs = _read_json(attempt_dir / "info.json") or {}
 
     # Write summary/status.json.
     status_summary = {
@@ -114,9 +114,9 @@ def collect_run(run_dir: Path) -> dict:
         json.dumps(status_summary, indent=2) + "\n"
     )
 
-    # Write summary/observables.json.
+    # Write summary/info.json.
     obs_summary = {"run_id": run_id, **obs}
-    (summary_dir / "observables.json").write_text(
+    (summary_dir / "info.json").write_text(
         json.dumps(obs_summary, indent=2) + "\n"
     )
 
