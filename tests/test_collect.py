@@ -44,7 +44,7 @@ def _make_run_dir(tmp_path: Path, run_id: str, state: RunState, energy: float = 
     )
 
     obs = {"energy": energy, "converged": state == RunState.COMPLETED, "n_sweeps": 5}
-    (run_dir / "main" / "attempts" / "attempt_01" / "observables.json").write_text(
+    (run_dir / "main" / "attempts" / "attempt_01" / "info.json").write_text(
         json.dumps(obs)
     )
 
@@ -70,7 +70,7 @@ class TestCollectRun:
         run_dir = _make_run_dir(tmp_path, "run02", RunState.FAILED)
         collect_run(run_dir)
         assert (run_dir / "summary" / "status.json").exists()
-        assert (run_dir / "summary" / "observables.json").exists()
+        assert (run_dir / "summary" / "info.json").exists()
 
     def test_missing_observables_does_not_crash(self, tmp_path):
         run_dir = tmp_path / "run03"
