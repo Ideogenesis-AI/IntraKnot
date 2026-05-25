@@ -147,6 +147,8 @@ class TestLoadMachineConfig:
         self._write_paths(tmp_path)
         mc = load_machine_config(tmp_path)
         assert mc.paths.project_root == "/scratch/runs"
+        assert mc.paths.scratch_root == "/scratch"
+        assert mc.paths.scratch_node == "/tmp/$USER"
         assert mc.paths.command == "uv run"
 
     def test_missing_files_give_defaults(self, tmp_path):
@@ -204,6 +206,10 @@ class TestTemplateGenerators:
         write_paths_toml(p)
         text = p.read_text()
         assert "[paths]" in text
+        assert "project_root" in text
+        assert "scratch_root" in text
+        assert "scratch_node" in text
+        assert "command" in text
         assert "uv run" in text
 
     def test_write_machines_yaml(self, tmp_path):
