@@ -25,13 +25,18 @@ from unittest.mock import patch
 import pytest
 
 from intraknot.config import MachineConfig, PathsConfig
+import yaml
+
 from intraknot.launch import (
     _dump_toml,
     _find_exec_script,
+    _register_run_in_campaign,
     _render_slurm_header,
     create_attempt,
     create_campaign,
+    create_run,
     prepare_exec,
+    remove_run_from_all_campaigns,
     update_current,
     write_exec_slurm_script,
     write_slurm_script,
@@ -189,6 +194,152 @@ class TestCreateCampaign:
         create_campaign("c1", "", "dmrg", campaigns_root)
         with pytest.raises(FileExistsError):
             create_campaign("c1", "", "dmrg", campaigns_root)
+
+
+# ---------------------------------------------------------------------------
+# _register_run_in_campaign
+# ---------------------------------------------------------------------------
+
+class TestRegisterRunInCampaign:
+    def test_no_duplicate_on_double_register(self, tmp_path):
+        campaign_dir = tmp_path / "c1"
+        campaign_dir.mkdir()
+        _register_run_in_campaign(campaign_dir, "run01")
+        _register_run_in_campaign(campaign_dir, "run01")  # second call must be a no-op
+        with open(campaign_dir / "runs.csv", newline="") as f:
+            rows = list(csv.reader(f))
+        data_rows = [r for r in rows if r and r[0] != "run_id"]
+        assert len(data_rows) == 1
+
+    def test_different_run_ids_both_registered(self, tmp_path):
+        campaign_dir = tmp_path / "c1"
+        campaign_dir.mkdir()
+        _register_run_in_campaign(campaign_dir, "run01")
+        _register_run_in_campaign(campaign_dir, "run02")
+        with open(campaign_dir / "runs.csv", newline="") as f:
+            rows = list(csv.reader(f))
+        data_rows = [r for r in rows if r and r[0] != "run_id"]
+        assert len(data_rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# create_run — manifest contents
+# ---------------------------------------------------------------------------
+
+class TestCreateRunManifest:
+    def _setup(self, tmp_path: Path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        create_campaign("mycampaign", "", "dmrg", campaigns_root)
+        return campaigns_root, runs_root
+
+    def test_manifest_has_required_keys(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert manifest["run_id"] == "run01"
+        assert manifest["algorithm"] == "dmrg"
+        assert "created_at" in manifest
+
+    def test_manifest_has_uuid(self, tmp_path):
+        import uuid
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert "uuid" in manifest
+        # Value must be a valid UUID4.
+        parsed = uuid.UUID(manifest["uuid"])
+        assert parsed.version == 4
+
+    def test_manifest_uuid_matches_supplied_run_uuid(self, tmp_path):
+        import uuid
+        campaigns_root, runs_root = self._setup(tmp_path)
+        fixed_uuid = uuid.UUID("12345678-1234-4abc-89de-f01234567890")
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+            run_uuid=fixed_uuid,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert manifest["uuid"] == str(fixed_uuid)
+
+    def test_manifest_has_no_campaign_key(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert "campaign" not in manifest
+
+    def test_manifest_has_no_status_key(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert "status" not in manifest
+
+    def test_manifest_has_no_machine_key(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert "machine" not in manifest
+
+
+# ---------------------------------------------------------------------------
+# remove_run_from_all_campaigns
+# ---------------------------------------------------------------------------
+
+class TestRemoveRunFromAllCampaigns:
+    def _make_campaign_csv(self, campaigns_root: Path, campaign_id: str, run_ids: list) -> Path:
+        campaign_dir = campaigns_root / campaign_id
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        with open(campaign_dir / "runs.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "scan_id", "status"])
+            for rid in run_ids:
+                writer.writerow([rid, "", "pending"])
+        return campaign_dir
+
+    def test_removes_from_all_matching_campaigns(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        self._make_campaign_csv(campaigns_root, "c1", ["run_a", "run_b"])
+        self._make_campaign_csv(campaigns_root, "c2", ["run_a", "run_c"])
+        self._make_campaign_csv(campaigns_root, "c3", ["run_c"])
+
+        removed = remove_run_from_all_campaigns(campaigns_root, "run_a")
+
+        assert sorted(removed) == ["c1", "c2"]
+        # run_a must be gone from c1 and c2.
+        for cid in ("c1", "c2"):
+            with open(campaigns_root / cid / "runs.csv", newline="") as f:
+                ids = [r[0] for r in csv.reader(f) if r and r[0] != "run_id"]
+            assert "run_a" not in ids
+        # c3 was unaffected.
+        with open(campaigns_root / "c3" / "runs.csv", newline="") as f:
+            ids = [r[0] for r in csv.reader(f) if r and r[0] != "run_id"]
+        assert "run_c" in ids
+
+    def test_returns_empty_when_run_not_found(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        self._make_campaign_csv(campaigns_root, "c1", ["run_x"])
+        removed = remove_run_from_all_campaigns(campaigns_root, "run_ghost")
+        assert removed == []
+
+    def test_returns_empty_when_campaigns_root_absent(self, tmp_path):
+        removed = remove_run_from_all_campaigns(tmp_path / "nonexistent", "run_a")
+        assert removed == []
 
 
 # ---------------------------------------------------------------------------
