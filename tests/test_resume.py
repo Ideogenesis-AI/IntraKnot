@@ -94,6 +94,13 @@ class TestIsResumable:
         run_dir.mkdir()
         assert is_resumable(run_dir) is False
 
+    def test_not_converged_is_resumable(self, tmp_path):
+        run_dir = _make_run_dir(
+            tmp_path, "r5", RunState.FAILED,
+            restartable=True, reason=FailureReason.NOT_CONVERGED,
+        )
+        assert is_resumable(run_dir) is True
+
 
 class TestResumeRun:
     def test_raises_when_not_resumable(self, tmp_path):
