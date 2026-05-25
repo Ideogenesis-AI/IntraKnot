@@ -37,9 +37,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
+import uuid as _uuid_mod
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +51,7 @@ import yaml
 from .collect import collect_campaign, collect_run
 from .config import (
     MachineConfig,
+    _merge_defaults,
     iter_scan_combinations,
     load_campaign_defaults,
     load_machine_config,
@@ -65,6 +68,7 @@ from .launch import (
     delete_run,
     prepare_exec,
     read_runs_by_filter,
+    remove_run_from_all_campaigns,
     remove_run_from_campaign,
     submit_exec_job,
     submit_job,
@@ -152,17 +156,11 @@ def _resolve_campaign_dir(
 ) -> Optional[Path]:
     """Resolve the campaign directory for a run.
 
-    Reads from `manifest.yaml` when `campaign_id` is not explicitly given,
-    falling back to the active campaign. Returns `None` if unresolvable.
+    Resolution order:
+    1. `campaign_id` argument (explicit `--campaign` option).
+    2. Active campaign from the `INTRAKNOT_CAMPAIGN` env var or `.iknot_state`.
+    3. `None` — the caller must handle the missing campaign case.
     """
-    if campaign_id is None:
-        manifest = run_dir / "manifest.yaml"
-        if manifest.exists():
-            try:
-                data = yaml.safe_load(manifest.read_text()) or {}
-                campaign_id = data.get("campaign")
-            except Exception:
-                pass
     if campaign_id is None:
         campaign_id, _ = _resolve_active_campaign()
     if campaign_id is None:
@@ -456,7 +454,10 @@ def run_create(
 
         any_error = False
         for nested_overrides, flat_overrides in combinations:
-            generated_id = make_run_id(campaign_id, flat_overrides)
+            merged_cfg = _merge_defaults(nested_overrides, defaults)
+            run_uuid = _uuid_mod.uuid4()
+            uuid8 = str(run_uuid).replace("-", "")[:8]
+            generated_id = make_run_id(merged_cfg, flat_overrides, uuid8)
             try:
                 run_dir = create_run(
                     run_id=generated_id,
@@ -467,6 +468,7 @@ def run_create(
                     machine=machine,
                     scan_id=scan_id or "",
                     overrides=nested_overrides,
+                    run_uuid=run_uuid,
                 )
                 click.echo(f"Created run: {run_dir}")
             except (FileExistsError, FileNotFoundError, ValueError) as e:
@@ -772,11 +774,13 @@ def run_exec(
 @grp_run.command("delete")
 @click.argument("run_id")
 @click.option("--campaign", "campaign_id", default=None,
-              help="Campaign ID. Resolved from manifest.yaml or active campaign when omitted.")
+              help="Campaign ID. Defaults to the active campaign. Ignored when --delete-dir "
+                   "is given (all campaigns are scanned instead).")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--delete-dir", is_flag=True, default=False,
-              help="Also remove the run directory from disk.")
+              help="Also remove the run directory from disk. Removes the run from every "
+                   "campaign's runs.csv before deletion.")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Skip the confirmation prompt when --delete-dir is given.")
 def run_delete(
@@ -787,19 +791,19 @@ def run_delete(
     delete_dir: bool,
     yes: bool,
 ) -> None:
-    """Remove a run from its campaign's runs.csv.
+    """Remove a run from a campaign's runs.csv.
 
-    By default only deregisters the run from the campaign registry
-    (runs.csv); the run directory is left on disk. Pass --delete-dir to
-    also remove the directory. A confirmation prompt is shown unless --yes
-    is supplied.
+    Without --delete-dir, deregisters the run from the active (or specified)
+    campaign's runs.csv and leaves the run directory on disk.
+
+    With --delete-dir, removes the run from every campaign that lists it,
+    then deletes the run directory. A confirmation prompt is shown unless
+    --yes is supplied.
     """
     run_dir = Path(runs_root) / run_id
     if not run_dir.exists():
         click.echo(f"Error: run directory not found: {run_dir}", err=True)
         sys.exit(1)
-
-    campaign_dir = _resolve_campaign_dir(run_dir, campaign_id, campaigns_root)
 
     if delete_dir and not yes:
         click.confirm(
@@ -808,23 +812,33 @@ def run_delete(
         )
 
     try:
-        found_in_csv = delete_run(run_dir, campaign_dir=campaign_dir, delete_dir=delete_dir)
+        if delete_dir:
+            # Sweep all campaigns, then delete the directory.
+            cleaned = remove_run_from_all_campaigns(Path(campaigns_root), run_id)
+            if cleaned:
+                for c in cleaned:
+                    click.echo(f"Removed {run_id} from {c}/runs.csv.")
+            else:
+                click.echo("Run was not listed in any campaign's runs.csv.")
+            shutil.rmtree(run_dir)
+            click.echo(f"Deleted run directory: {run_dir}")
+        else:
+            # Single-campaign deregistration; directory is preserved.
+            campaign_dir = _resolve_campaign_dir(run_dir, campaign_id, campaigns_root)
+            found_in_csv = delete_run(run_dir, campaign_dir=campaign_dir, delete_dir=False)
+            if campaign_dir is not None:
+                if found_in_csv:
+                    click.echo(f"Removed {run_id} from {campaign_dir.name}/runs.csv.")
+                else:
+                    click.echo(
+                        f"Run {run_id} was not listed in {campaign_dir.name}/runs.csv."
+                    )
+            else:
+                click.echo("No campaign found; runs.csv not updated.")
+            click.echo(f"Run directory preserved: {run_dir}")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-    if campaign_dir is not None:
-        if found_in_csv:
-            click.echo(f"Removed {run_id} from {campaign_dir.name}/runs.csv.")
-        else:
-            click.echo(f"Run {run_id} was not listed in {campaign_dir.name}/runs.csv.")
-    else:
-        click.echo("No campaign found; runs.csv not updated.")
-
-    if delete_dir:
-        click.echo(f"Deleted run directory: {run_dir}")
-    else:
-        click.echo(f"Run directory preserved: {run_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -969,7 +983,7 @@ def cmd_status(run_id: str, runs_root: str) -> None:
         click.echo(f"Hostname        : {s.hostname or '—'}")
 
         # Also show summary observables if available.
-        obs_path = run_dir / "summary" / "observables.json"
+        obs_path = run_dir / "summary" / "info.json"
         if obs_path.exists():
             try:
                 obs = json.loads(obs_path.read_text())

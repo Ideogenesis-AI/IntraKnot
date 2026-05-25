@@ -653,31 +653,57 @@ def iter_scan_combinations(
         yield nested, flat
 
 
-def make_run_id(campaign_id: str, flat_overrides: Dict[str, Any]) -> str:
-    """Build an auto-generated run identifier from campaign name and overrides.
+def make_run_id(merged_cfg: Dict[str, Any], flat_overrides: Dict[str, Any], uuid8: str) -> str:
+    """Build an auto-generated run identifier from merged config and overrides.
 
-    Keys are sorted alphabetically. Floats are formatted with Python's
-    `g`-format. The separator between key and value is `=`; pairs are
-    joined by `_`.
+    The identifier follows the format:
+
+        <engine>_<model_label>_<lattice_descriptor>[_<overrides>]_<uuid8>
+
+    where `lattice_descriptor` is `<lattice>_len=<lx>` for 1-D geometries
+    and `<lattice>_cell=<lx>x<ly>` for 2-D geometries (when `ly > 1`).
+    Override pairs are sorted alphabetically; floats use `g`-format.
 
     Parameters
     ----------
-    campaign_id:
-        Campaign identifier (e.g. `"test_heisenberg_dmrg"`).
+    merged_cfg:
+        Fully merged run configuration (campaign defaults + run overrides).
     flat_overrides:
-        `{leafkey: value}` mapping of the overridden parameters.
+        `{leafkey: value}` mapping of the explicitly overridden parameters.
+        Omitted from the ID when empty.
+    uuid8:
+        8-character hex suffix (typically the first 8 chars of a UUID4
+        with hyphens removed, e.g. `"a3f7b291"`).
 
     Returns
     -------
     str
-        Run ID such as `"test_heisenberg_dmrg_lx=40_max_bond=128"`.
+        Run ID such as `"dmrg_heisenberg_chain_len=20_max_bond=128_a3f7b291"`.
     """
-    if not flat_overrides:
-        return campaign_id
-    pairs = "_".join(
-        f"{k}={_format_value(v)}" for k, v in sorted(flat_overrides.items())
-    )
-    return f"{campaign_id}_{pairs}"
+    geo = merged_cfg.get("geometry", {})
+    alg = merged_cfg.get("algorithm", {})
+    mdl = merged_cfg.get("model", {})
+
+    engine = str(alg.get("engine", "run")).lower()
+    label = str(mdl.get("label", "unknown")).lower()
+
+    lattice = str(geo.get("lattice", "chain")).lower()
+    lx = geo.get("lx", 0)
+    ly = geo.get("ly", None)
+    if ly is not None and int(ly) > 1:
+        lattice_desc = f"{lattice}_cell={lx}x{ly}"
+    else:
+        lattice_desc = f"{lattice}_len={lx}"
+
+    parts: List[str] = [engine, label, lattice_desc]
+    if flat_overrides:
+        overrides_str = "_".join(
+            f"{k}={_format_value(v)}" for k, v in sorted(flat_overrides.items())
+        )
+        parts.append(overrides_str)
+    parts.append(uuid8)
+
+    return "_".join(parts)
 
 
 def _merge_defaults(
