@@ -26,6 +26,7 @@ from intraknot.status import (
     AttemptStatus,
     FailureReason,
     MainStatus,
+    RETRYABLE_REASONS,
     RunState,
     read_status,
     write_status,
@@ -46,6 +47,9 @@ class TestFailureReason:
     def test_values_are_strings(self):
         for reason in FailureReason:
             assert isinstance(reason.value, str)
+
+    def test_not_converged_is_retryable(self):
+        assert FailureReason.NOT_CONVERGED in RETRYABLE_REASONS
 
 
 class TestAttemptStatus:
@@ -101,6 +105,7 @@ class TestMainStatus:
         assert s.current_attempt is None
         assert s.reason is None
         assert s.restartable is False
+        assert s.hostname is None
 
     def test_to_dict_state_is_string(self):
         s = MainStatus(state=RunState.RUNNING, current_attempt="attempt_01")
@@ -114,12 +119,14 @@ class TestMainStatus:
             current_attempt="attempt_02",
             reason=FailureReason.TIMEOUT,
             restartable=True,
+            hostname="node42.cluster",
         )
         s2 = MainStatus.from_dict(s.to_dict())
         assert s2.state == s.state
         assert s2.current_attempt == s.current_attempt
         assert s2.reason == s.reason
         assert s2.restartable == s.restartable
+        assert s2.hostname == "node42.cluster"
 
 
 class TestReadWriteStatus:
