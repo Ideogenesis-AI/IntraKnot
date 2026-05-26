@@ -28,11 +28,11 @@ from intraknot.config import (
     SlurmTomlConfig,
     _merge_defaults,
     load_campaign_defaults,
+    load_cluster_discovery,
     load_config,
     load_machine_config,
     load_slurm_toml,
     write_data_gitignore,
-    write_machines_yaml,
     write_paths_toml,
     write_slurm_toml,
 )
@@ -212,12 +212,6 @@ class TestTemplateGenerators:
         assert "command" in text
         assert "uv run" in text
 
-    def test_write_machines_yaml(self, tmp_path):
-        p = tmp_path / "machines.yaml"
-        write_machines_yaml(p)
-        assert p.exists()
-        assert "machines" in p.read_text()
-
     def test_write_data_gitignore(self, tmp_path):
         d = tmp_path / "data"
         write_data_gitignore(d)
@@ -225,6 +219,51 @@ class TestTemplateGenerators:
         assert gi.exists()
         assert "*" in gi.read_text()
         assert "!.gitignore" not in gi.read_text()
+
+
+# ---------------------------------------------------------------------------
+# load_cluster_discovery
+# ---------------------------------------------------------------------------
+
+class TestLoadClusterDiscovery:
+    def test_returns_none_when_absent(self, tmp_path):
+        assert load_cluster_discovery(tmp_path) is None
+
+    def test_loads_cluster_yaml(self, tmp_path):
+        (tmp_path / "cluster.yaml").write_text(
+            "discovered_at: '2026-05-26T00:00:00+00:00'\n"
+            "hostname: 'login.example.com'\n"
+            "partitions:\n"
+            "  - name: cpu\n"
+            "    state: up\n"
+            "    default: true\n"
+            "    time_limit: '7-00:00:00'\n"
+            "    node_groups:\n"
+            "      - nodes: 'node[01-04]'\n"
+            "        cpus: 32\n"
+            "        mem_mb: 128000\n"
+            "        gres: ''\n"
+            "        features: [epyc]\n"
+            "features:\n"
+            "  epyc:\n"
+            "    partitions: [cpu]\n"
+            "    node_count: 4\n"
+        )
+        disc = load_cluster_discovery(tmp_path)
+        assert disc is not None
+        assert disc.hostname == "login.example.com"
+        assert len(disc.partitions) == 1
+        p = disc.partitions[0]
+        assert p.name == "cpu"
+        assert p.default is True
+        assert len(p.node_groups) == 1
+        g = p.node_groups[0]
+        assert g.nodes == "node[01-04]"
+        assert g.cpus == 32
+        assert g.mem_mb == 128000
+        assert g.features == ["epyc"]
+        assert disc.features["epyc"].node_count == 4
+        assert disc.features["epyc"].partitions == ["cpu"]
 
 
 # ---------------------------------------------------------------------------
