@@ -57,10 +57,10 @@ from .config import (
     load_machine_config,
     make_run_id,
     write_data_gitignore,
-    write_machines_yaml,
     write_paths_toml,
     write_slurm_toml,
 )
+from .discover import discover_cluster, load_discovery, save_discovery
 from .launch import (
     create_attempt,
     create_campaign,
@@ -193,8 +193,12 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     """Initialise the IntraKnot project skeleton.
 
     Creates configs/, campaigns/, runs/, and notebooks/. Writes template
-    configs/slurm.toml, configs/paths.toml, and configs/machines.yaml.
-    Appends .iknot_state to the root .gitignore.
+    configs/slurm.toml and configs/paths.toml. Appends .iknot_state to the
+    root .gitignore.
+
+    After init, edit configs/slurm.toml and configs/paths.toml for the
+    target cluster, then run `iknot cluster sync` to discover available
+    partitions and constraint values.
 
     When run inside the IntraKnot source repository itself, each created
     directory also receives a .gitignore that excludes all its contents from
@@ -212,16 +216,12 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
         configs_dir.mkdir(parents=True, exist_ok=True)
     slurm_path = configs_dir / "slurm.toml"
     paths_path = configs_dir / "paths.toml"
-    machines_path = configs_dir / "machines.yaml"
     if not slurm_path.exists():
         write_slurm_toml(slurm_path)
         click.echo(f"  created {slurm_path.relative_to(cwd)}")
     if not paths_path.exists():
         write_paths_toml(paths_path)
         click.echo(f"  created {paths_path.relative_to(cwd)}")
-    if not machines_path.exists():
-        write_machines_yaml(machines_path)
-        click.echo(f"  created {machines_path.relative_to(cwd)}")
 
     # Data directories.
     for rel in (campaigns_root, runs_root, notebooks_root):
@@ -244,7 +244,10 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
         root_gitignore.write_text(entry)
     click.echo("  updated .gitignore")
 
-    click.echo("\nDone. Edit configs/slurm.toml and configs/paths.toml before submitting jobs.")
+    click.echo(
+        "\nDone. Edit configs/slurm.toml and configs/paths.toml, then run "
+        "`iknot cluster sync` to discover available partitions and constraints."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1015,3 +1018,129 @@ def cmd_status(run_id: str, runs_root: str) -> None:
                     click.echo(f"  {slot_name:<30} {state_val}")
     else:
         click.echo(json.dumps(s.to_dict(), indent=2))
+
+
+# ---------------------------------------------------------------------------
+# iknot cluster
+# ---------------------------------------------------------------------------
+
+@main.group("cluster")
+def grp_cluster() -> None:
+    """Discover and inspect cluster hardware."""
+
+
+@grp_cluster.command("sync")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def cluster_sync(machine_opt: Optional[str]) -> None:
+    """Query sinfo and write configs/cluster.yaml.
+
+    Runs two sinfo calls to discover partitions and per-node hardware specs,
+    groups nodes into hardware-uniform groups, and writes the result to
+    configs/cluster.yaml. Re-run after the cluster admin adds or removes
+    nodes or partitions.
+    """
+    configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
+    try:
+        discovery = discover_cluster()
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    save_discovery(discovery, configs_dir)
+
+    total_nodes = sum(
+        sum(
+            1  # placeholder; _count_nodes handles the real count inside discover
+            for _ in p.node_groups
+        )
+        for p in discovery.partitions
+    )
+    # Report actual node count from the feature index (avoids duplicates
+    # for nodes that appear in multiple partitions).
+    n_partitions = len(discovery.partitions)
+    click.echo(
+        f"Synced {n_partitions} partition(s) from {discovery.hostname} "
+        f"→ {configs_dir / 'cluster.yaml'}"
+    )
+
+
+@grp_cluster.command("show")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def cluster_show(machine_opt: Optional[str]) -> None:
+    """Pretty-print the stored cluster.yaml as partition and feature tables.
+
+    Shows two tables:
+      1. Per-partition node groups with hardware specs.
+      2. Feature/constraint index with partition membership and node counts.
+
+    Run `iknot cluster sync` first to populate configs/cluster.yaml.
+    """
+    configs_dir = Path(machine_opt) if machine_opt else Path.cwd() / "configs"
+    discovery = load_discovery(configs_dir)
+    if discovery is None:
+        click.echo(
+            "No cluster.yaml found. Run `iknot cluster sync` first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Header.
+    click.echo(f"Discovered: {discovery.discovered_at}  ({discovery.hostname})")
+
+    # Per-partition tables.
+    for part in discovery.partitions:
+        default_tag = " [default]" if part.default else ""
+        click.echo(
+            f"\nPartition: {part.name}{default_tag}"
+            f"  state={part.state}  timelimit={part.time_limit}"
+        )
+        if not part.node_groups:
+            click.echo("  (no nodes)")
+            continue
+
+        # Determine column widths.
+        node_w = max(len(g.nodes) for g in part.node_groups)
+        node_w = max(node_w, 5)  # at least "NODES"
+        feat_w = max(
+            (len(", ".join(g.features)) for g in part.node_groups),
+            default=8,
+        )
+        feat_w = max(feat_w, 8)  # at least "FEATURES"
+
+        header = (
+            f"  {'NODES':<{node_w}}  {'CPUS':>4}  {'MEM(GB)':>7}  "
+            f"{'GRES':<16}  FEATURES"
+        )
+        click.echo(header)
+        click.echo("  " + "-" * (node_w + 4 + 7 + 16 + feat_w + 12))
+        for g in part.node_groups:
+            mem_gb = g.mem_mb // 1000
+            gres_col = g.gres if g.gres else ""
+            feat_col = ", ".join(g.features)
+            click.echo(
+                f"  {g.nodes:<{node_w}}  {g.cpus:>4}  {mem_gb:>7}  "
+                f"{gres_col:<16}  {feat_col}"
+            )
+
+    # Feature/constraint index.
+    if discovery.features:
+        click.echo("\nFeatures / Constraints:")
+        feat_name_w = max(len(n) for n in discovery.features)
+        feat_name_w = max(feat_name_w, 7)  # at least "FEATURE"
+        part_col_w = max(
+            len(", ".join(fi.partitions)) for fi in discovery.features.values()
+        )
+        part_col_w = max(part_col_w, 10)  # at least "PARTITIONS"
+        header = (
+            f"  {'FEATURE':<{feat_name_w}}  {'PARTITIONS':<{part_col_w}}  NODES"
+        )
+        click.echo(header)
+        click.echo("  " + "-" * (feat_name_w + part_col_w + 12))
+        for fname, fi in discovery.features.items():
+            parts_str = ", ".join(fi.partitions)
+            click.echo(
+                f"  {fname:<{feat_name_w}}  {parts_str:<{part_col_w}}  "
+                f"{fi.node_count:>5}"
+            )
