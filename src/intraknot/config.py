@@ -18,7 +18,7 @@
 
 """Config loaders and template generators for IntraKnot.
 
-Two namespaces are kept strictly separate:
+Three namespaces are kept strictly separate:
 
     configs/paths.toml
         Machine filesystem settings — where to find the Python interpreter,
@@ -29,6 +29,12 @@ Two namespaces are kept strictly separate:
         The file at configs/ is the master template; it is copied verbatim to
         each campaign on creation, and from there to each run. Users edit the
         copies to customise settings at the desired granularity.
+
+    configs/cluster.yaml
+        Auto-generated cluster topology written by `iknot cluster sync`.
+        Records the hostname, discovery timestamp, per-partition node groups
+        (hardware specs in Slurm bracket notation), and a top-level
+        feature/constraint index. Never edit this file by hand.
 
     runs/<run_id>/config.toml
         Scientific simulation configuration — what to run (Alice-compatible).
@@ -46,6 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import yaml
+
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +170,107 @@ class MachineConfig:
     """
 
     paths: PathsConfig = field(default_factory=PathsConfig)
+
+
+# ---------------------------------------------------------------------------
+# Cluster discovery dataclasses (populated by `iknot cluster sync`)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class NodeGroup:
+    """A group of nodes with identical hardware specs within a partition.
+
+    Nodes are grouped by name prefix first, then split by `(cpus, mem_mb,
+    gres)` so that every entry in the group has uniform hardware. The node
+    list is stored in Slurm bracket notation (e.g. `"th-cl-hua[01-10]"`).
+
+    Parameters
+    ----------
+    nodes:
+        Slurm bracket-notation node list, e.g. `"th-cl-hua[01-10]"`.
+    cpus:
+        Number of CPU cores per node.
+    mem_mb:
+        Memory per node in MiB.
+    gres:
+        Generic Resource string (e.g. `"gpu:a100:4"`), or `""` if none.
+    features:
+        Union of all feature/constraint labels present on nodes in this
+        group. Labels are admin-assigned and may not be perfectly uniform
+        across the group.
+    """
+
+    nodes: str
+    cpus: int
+    mem_mb: int
+    gres: str
+    features: List[str]
+
+
+@dataclass
+class PartitionInfo:
+    """Metadata for one Slurm partition discovered by `iknot cluster sync`.
+
+    Parameters
+    ----------
+    name:
+        Partition name.
+    state:
+        Availability state: `"up"`, `"down"`, or `"drain"`.
+    default:
+        `True` when this is the cluster's default partition.
+    time_limit:
+        Maximum walltime string as reported by Slurm (e.g. `"21-00:00:00"`).
+    node_groups:
+        Hardware-uniform node groups within this partition.
+    """
+
+    name: str
+    state: str
+    default: bool
+    time_limit: str
+    node_groups: List[NodeGroup]
+
+
+@dataclass
+class FeatureInfo:
+    """Summary of a single Slurm feature (constraint) across all partitions.
+
+    Parameters
+    ----------
+    partitions:
+        Names of partitions that contain at least one node tagged with this
+        feature.
+    node_count:
+        Total number of nodes tagged with this feature across all partitions.
+        Nodes belonging to multiple partitions are counted once per
+        partition entry.
+    """
+
+    partitions: List[str]
+    node_count: int
+
+
+@dataclass
+class ClusterDiscovery:
+    """Full cluster topology snapshot written to `configs/cluster.yaml`.
+
+    Parameters
+    ----------
+    hostname:
+        Login-node hostname as returned by `socket.getfqdn()`.
+    discovered_at:
+        ISO-8601 timestamp of when `iknot cluster sync` was run.
+    partitions:
+        Ordered list of discovered partitions.
+    features:
+        Mapping from feature/constraint name to its `FeatureInfo` summary.
+    """
+
+    hostname: str
+    discovered_at: str
+    partitions: List[PartitionInfo]
+    features: Dict[str, FeatureInfo]
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +392,62 @@ def load_machine_config(configs_dir: Path) -> MachineConfig:
     return MachineConfig(paths=paths_cfg)
 
 
+def load_cluster_discovery(configs_dir: Path) -> Optional[ClusterDiscovery]:
+    """Load `configs/cluster.yaml` into a `ClusterDiscovery`, or return `None`.
+
+    Returns `None` when `cluster.yaml` is absent (i.e. `iknot cluster sync`
+    has not yet been run) so callers can distinguish "missing" from "empty".
+
+    Parameters
+    ----------
+    configs_dir:
+        Directory containing `cluster.yaml`.
+
+    Returns
+    -------
+    ClusterDiscovery or None
+        Parsed discovery snapshot, or `None` if the file does not exist.
+    """
+    path = configs_dir / "cluster.yaml"
+    if not path.exists():
+        return None
+
+    raw = load_config(path)
+
+    partitions: List[PartitionInfo] = []
+    for p in raw.get("partitions", []):
+        groups: List[NodeGroup] = []
+        for g in p.get("node_groups", []):
+            groups.append(NodeGroup(
+                nodes=g["nodes"],
+                cpus=int(g["cpus"]),
+                mem_mb=int(g["mem_mb"]),
+                gres=g.get("gres", ""),
+                features=list(g.get("features", [])),
+            ))
+        partitions.append(PartitionInfo(
+            name=p["name"],
+            state=p.get("state", ""),
+            default=bool(p.get("default", False)),
+            time_limit=p.get("time_limit", ""),
+            node_groups=groups,
+        ))
+
+    features: Dict[str, FeatureInfo] = {}
+    for fname, fdata in raw.get("features", {}).items():
+        features[fname] = FeatureInfo(
+            partitions=list(fdata.get("partitions", [])),
+            node_count=int(fdata.get("node_count", 0)),
+        )
+
+    return ClusterDiscovery(
+        hostname=raw.get("hostname", ""),
+        discovered_at=raw.get("discovered_at", ""),
+        partitions=partitions,
+        features=features,
+    )
+
+
 def load_campaign_defaults(campaign_dir: Path) -> Dict[str, Any]:
     """Load optional `defaults.toml` from a campaign directory.
 
@@ -338,21 +502,6 @@ def load_run_config(run_dir: Path) -> Dict[str, Any]:
 # Template generators (called by `iknot init` and campaign/run creation)
 # ---------------------------------------------------------------------------
 
-_MACHINES_YAML_TEMPLATE = """\
-# configs/machines.yaml
-# Registry of known HPC clusters. This file is for human reference only;
-# machine-specific submission settings live in slurm.toml and paths.toml.
-#
-# machines:
-#   - name: cluster_a
-#     hostname: login.cluster-a.example.com
-#     notes: Primary production cluster.
-#   - name: local
-#     hostname: localhost
-#     notes: Local development machine.
-machines: []
-"""
-
 _SLURM_TOML_TEMPLATE = """\
 # slurm.toml
 # Slurm scheduling settings.
@@ -401,18 +550,6 @@ command      = "uv run"     # Command used to invoke the runner script
 """
 
 _GITIGNORE_CONTENT = "*\n"
-
-
-def write_machines_yaml(path: Path) -> None:
-    """Write a skeleton `machines.yaml` registry to `path`.
-
-    Parameters
-    ----------
-    path:
-        Destination file path (typically `configs/machines.yaml`).
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_MACHINES_YAML_TEMPLATE)
 
 
 def write_slurm_toml(path: Path) -> None:
