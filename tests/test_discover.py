@@ -428,3 +428,16 @@ class TestSinfoNodeParsing:
         hua01 = next(r for r in rows if r["node"] == "th-cl-hua01")
         assert isinstance(hua01["cpus"], int)
         assert hua01["cpus"] == 64
+
+    def test_fqdn_stripped_to_short_hostname(self):
+        fqdn_fixture = textwrap.dedent("""\
+            th-cl-hua01.hpc.physik.uni-muenchen.de|cluster|64|256000|gpu:a100:4|cascade
+            th-ws-7010m21.theorie.physik.uni-muenchen.de|th-ws|6|23000||intel
+        """)
+        with patch("intraknot.discover._run_sinfo", return_value=fqdn_fixture):
+            rows = _sinfo_nodes()
+        node_names = [r["node"] for r in rows]
+        assert "th-cl-hua01" in node_names
+        assert "th-ws-7010m21" in node_names
+        # No FQDN suffixes should appear.
+        assert not any("." in r["node"] for r in rows)
