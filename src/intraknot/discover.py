@@ -129,6 +129,8 @@ def _sinfo_nodes() -> List[Dict]:
         if len(parts) < 6:
             continue
         node, partition, cpus_str, mem_str, gres, features_str = parts
+        # Strip FQDN suffix: keep only the short hostname before the first dot.
+        node = node.strip().split(".", 1)[0]
         partition = partition.strip().rstrip("*")
 
         # cpus can be reported as "N/A" on heterogeneous nodes; skip those.
