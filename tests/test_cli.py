@@ -99,7 +99,9 @@ class TestCmdInit:
             assert result.exit_code == 0, result.output
             assert (tmpdir / "configs" / "slurm.toml").exists()
             assert (tmpdir / "configs" / "paths.toml").exists()
-            assert (tmpdir / "configs" / "machines.yaml").exists()
+            # machines.yaml is no longer created by init; cluster.yaml is
+            # written by `iknot machine sync` instead.
+            assert not (tmpdir / "configs" / "machines.yaml").exists()
 
     def test_appends_iknot_state_to_root_gitignore(self):
         runner = CliRunner()
