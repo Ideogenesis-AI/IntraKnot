@@ -151,8 +151,8 @@ runs/heis_L64_chi128_g1.0/
 │           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
 │           ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
 │           ├── state.ckpt       # final MPS state (torch.save)
-│           ├── observables.json
-│           ├── convergence.csv
+│           ├── info.json
+│           ├── conv.csv
 │           └── status.json
 ├── exec/                # all exec (follow-up) jobs; one slot per script
 │   └── compute_sf/
@@ -162,7 +162,7 @@ runs/heis_L64_chi128_g1.0/
 │       ├── logs/
 │       └── <outputs>
 └── summary/
-    ├── observables.json
+    ├── info.json
     └── status.json
 ```
 
