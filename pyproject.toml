@@ -37,6 +37,7 @@ dependencies = [
   "torch>=2.5",
   "pyyaml>=6.0",
   "click>=8.1",
+  "textual>=0.52",
 ]
 
 [project.scripts]
