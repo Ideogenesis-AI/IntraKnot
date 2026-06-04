@@ -549,6 +549,16 @@ scratch_node = "/tmp/$USER" # Per-node local scratch
 command      = "uv run"     # Command used to invoke the runner script
 """
 
+_TUI_TOML_TEMPLATE = """\
+# configs/tui.toml
+# Settings for `iknot tui`.
+
+[tui]
+# Editor used to open log files (e.g. alice.log).
+# The dashboard suspends, launches this editor in the foreground, then resumes.
+editor = "vi"
+"""
+
 _GITIGNORE_CONTENT = "*\n"
 
 
@@ -574,6 +584,18 @@ def write_paths_toml(path: Path) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_PATHS_TOML_TEMPLATE)
+
+
+def write_tui_toml(path: Path) -> None:
+    """Write the `tui.toml` template to `path`.
+
+    Parameters
+    ----------
+    path:
+        Destination file path (typically `configs/tui.toml`).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_TUI_TOML_TEMPLATE)
 
 
 def write_data_gitignore(directory: Path) -> None:
