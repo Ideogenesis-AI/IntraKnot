@@ -83,6 +83,10 @@ Filesystem path settings for the target cluster:
 
 `iknot init` appends `.iknot_state` to the root `.gitignore`, creating the file if it does not already exist. `.iknot_state` is the local session state file that tracks the active campaign and should not be committed.
 
+#### `manual/` symlink
+
+`iknot init` creates a `manual/` symlink in the project root pointing to the bundled documentation directory inside the installed package. This makes the manual pages accessible at a predictable path (`./manual/<topic>.md`) for both users and agents working in the project, without requiring knowledge of where the package is installed. The symlink is skipped if `manual/` already exists or if the package is running from an editable install.
+
 ### Idempotency
 
 `iknot init` is safe to re-run. Existing files are never overwritten; only missing files and directories are created.
