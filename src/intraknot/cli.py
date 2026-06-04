@@ -249,6 +249,19 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
         root_gitignore.write_text(entry)
     click.echo("  updated .gitignore")
 
+    # manual/ symlink — point to the installed package's manual directory so
+    # that documentation is accessible at a predictable path in the project root.
+    # Skipped when running from an editable install (no bundled manual/ in src/).
+    import importlib.util
+    manual_link = cwd / "manual"
+    if not manual_link.exists() and not manual_link.is_symlink():
+        spec = importlib.util.find_spec("intraknot")
+        if spec and spec.submodule_search_locations:
+            pkg_manual = Path(list(spec.submodule_search_locations)[0]) / "manual"
+            if pkg_manual.is_dir():
+                manual_link.symlink_to(pkg_manual.resolve())
+                click.echo(f"  linked manual/ → {pkg_manual.resolve()}")
+
     click.echo(
         "\nDone. Edit configs/slurm.toml and configs/paths.toml, then run "
         "`iknot cluster sync` to discover available partitions and constraints."
