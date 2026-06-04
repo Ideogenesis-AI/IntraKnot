@@ -1021,6 +1021,28 @@ def cmd_status(run_id: str, runs_root: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# iknot tui
+# ---------------------------------------------------------------------------
+
+@main.command("tui")
+@click.option("--campaigns-root", default="campaigns", show_default=True,
+              help="Path to the campaigns directory.")
+@click.option("--runs-root", default="runs", show_default=True,
+              help="Path to the runs directory.")
+@click.option("--configs-dir", default="configs", show_default=True,
+              help="Path to the configs directory (reads tui.toml).")
+def cmd_tui(campaigns_root: str, runs_root: str, configs_dir: str) -> None:
+    """Launch the interactive campaign dashboard (TUI)."""
+    from .tui import DashboardApp
+    app = DashboardApp(
+        campaigns_root=Path(campaigns_root),
+        runs_root=Path(runs_root),
+        configs_dir=Path(configs_dir),
+    )
+    app.run()
+
+
+# ---------------------------------------------------------------------------
 # iknot cluster
 # ---------------------------------------------------------------------------
 
