@@ -58,6 +58,7 @@ from .config import (
     make_run_id,
     write_data_gitignore,
     write_paths_toml,
+    write_tui_toml,
     write_slurm_toml,
 )
 from .discover import discover_cluster, load_discovery, save_discovery
@@ -216,12 +217,16 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
         configs_dir.mkdir(parents=True, exist_ok=True)
     slurm_path = configs_dir / "slurm.toml"
     paths_path = configs_dir / "paths.toml"
+    tui_path = configs_dir / "tui.toml"
     if not slurm_path.exists():
         write_slurm_toml(slurm_path)
         click.echo(f"  created {slurm_path.relative_to(cwd)}")
     if not paths_path.exists():
         write_paths_toml(paths_path)
         click.echo(f"  created {paths_path.relative_to(cwd)}")
+    if not tui_path.exists():
+        write_tui_toml(tui_path)
+        click.echo(f"  created {tui_path.relative_to(cwd)}")
 
     # Data directories.
     for rel in (campaigns_root, runs_root, notebooks_root):
