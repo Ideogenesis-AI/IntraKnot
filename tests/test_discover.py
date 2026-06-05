@@ -24,7 +24,7 @@ the format produced by the actual `sinfo` command.
 """
 
 import textwrap
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -36,8 +36,10 @@ from intraknot.discover import (
     _fmt_range,
     _group_nodes_for_partition,
     _node_prefix,
+    _run_sinfo,
     _sinfo_nodes,
     _sinfo_partitions,
+    discover_cluster,
     load_discovery,
     save_discovery,
 )
@@ -441,3 +443,120 @@ class TestSinfoNodeParsing:
         assert "th-ws-7010m21" in node_names
         # No FQDN suffixes should appear.
         assert not any("." in r["node"] for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# _fmt_range directly
+# ---------------------------------------------------------------------------
+
+class TestFmtRange:
+    def test_single_value(self):
+        assert _fmt_range(3, 3, 0) == "3"
+
+    def test_range(self):
+        assert _fmt_range(1, 5, 0) == "1-5"
+
+    def test_zero_padded_single(self):
+        assert _fmt_range(7, 7, 2) == "07"
+
+    def test_zero_padded_range(self):
+        assert _fmt_range(1, 12, 2) == "01-12"
+
+    def test_start_equals_end_returns_single(self):
+        assert "-" not in _fmt_range(42, 42, 3)
+        assert _fmt_range(42, 42, 3) == "042"
+
+
+# ---------------------------------------------------------------------------
+# _run_sinfo error cases
+# ---------------------------------------------------------------------------
+
+class TestRunSinfo:
+    def test_sinfo_not_found_raises_runtime(self):
+        with patch("intraknot.discover.subprocess.run",
+                   side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="sinfo"):
+                _run_sinfo([])
+
+    def test_nonzero_exit_raises_runtime(self):
+        import subprocess as sp
+        mock = MagicMock()
+        mock.returncode = 1
+        mock.stderr = "error message"
+        with patch("intraknot.discover.subprocess.run", return_value=mock):
+            with pytest.raises(RuntimeError, match="exited with code 1"):
+                _run_sinfo([])
+
+
+# ---------------------------------------------------------------------------
+# _sinfo_nodes N/A cpus skip branch
+# ---------------------------------------------------------------------------
+
+class TestSinfoNodesNACpus:
+    def test_na_cpus_row_skipped(self):
+        fixture = "th-cl-node01|cluster|N/A|256000|(null)|avx512\n"
+        with patch("intraknot.discover._run_sinfo", return_value=fixture):
+            rows = _sinfo_nodes()
+        assert not any(r["node"] == "th-cl-node01" for r in rows)
+
+    def test_valid_rows_still_returned_alongside_na(self):
+        fixture = (
+            "th-cl-node01|cluster|N/A|256000|(null)|avx512\n"
+            "th-cl-node02|cluster|64|128000|(null)|avx512\n"
+        )
+        with patch("intraknot.discover._run_sinfo", return_value=fixture):
+            rows = _sinfo_nodes()
+        assert len(rows) == 1
+        assert rows[0]["node"] == "th-cl-node02"
+
+
+# ---------------------------------------------------------------------------
+# discover_cluster integration (mocked sinfo calls)
+# ---------------------------------------------------------------------------
+
+_PART_FIXTURE = textwrap.dedent("""\
+    gpu*|up|infinite
+    cpu|up|4:00:00
+""")
+
+_NODES_FIXTURE = textwrap.dedent("""\
+    th-cl-hua01|gpu|64|512000|gpu:a100:4|cascade,avx512
+    th-cl-rome01|cpu|128|256000|(null)|rome,avx512
+""")
+
+
+class TestDiscoverClusterIntegration:
+    def _run_sinfo_side_effect(self, args):
+        if "--summarize" in args:
+            return _PART_FIXTURE
+        return _NODES_FIXTURE
+
+    def test_partition_names(self):
+        with patch("intraknot.discover._run_sinfo",
+                   side_effect=self._run_sinfo_side_effect):
+            disc = discover_cluster()
+        names = {p.name for p in disc.partitions}
+        assert "gpu" in names
+        assert "cpu" in names
+
+    def test_default_partition(self):
+        with patch("intraknot.discover._run_sinfo",
+                   side_effect=self._run_sinfo_side_effect):
+            disc = discover_cluster()
+        gpu_part = next(p for p in disc.partitions if p.name == "gpu")
+        assert gpu_part.default is True
+
+    def test_node_groups_populated(self):
+        with patch("intraknot.discover._run_sinfo",
+                   side_effect=self._run_sinfo_side_effect):
+            disc = discover_cluster()
+        gpu_part = next(p for p in disc.partitions if p.name == "gpu")
+        assert len(gpu_part.node_groups) == 1
+        assert "th-cl-hua01" in gpu_part.node_groups[0].nodes
+
+    def test_feature_index_populated(self):
+        with patch("intraknot.discover._run_sinfo",
+                   side_effect=self._run_sinfo_side_effect):
+            disc = discover_cluster()
+        assert "avx512" in disc.features
+        assert "cascade" in disc.features
