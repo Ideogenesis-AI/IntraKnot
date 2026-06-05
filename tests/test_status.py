@@ -169,3 +169,79 @@ class TestReadWriteStatus:
         write_status(path, s)
         data = json.loads(path.read_text())
         assert "state" in data
+
+
+# ---------------------------------------------------------------------------
+# TERMINAL_STATES membership
+# ---------------------------------------------------------------------------
+
+class TestTerminalStates:
+    @pytest.mark.parametrize("state", [
+        RunState.COMPLETED,
+        RunState.FAILED,
+        RunState.INVALID,
+        RunState.SKIPPED,
+        RunState.CANCELLED,
+    ])
+    def test_expected_states_are_terminal(self, state):
+        from intraknot.status import TERMINAL_STATES
+        assert state in TERMINAL_STATES
+
+    def test_pending_is_not_terminal(self):
+        from intraknot.status import TERMINAL_STATES
+        assert RunState.PENDING not in TERMINAL_STATES
+
+    def test_running_is_not_terminal(self):
+        from intraknot.status import TERMINAL_STATES
+        assert RunState.RUNNING not in TERMINAL_STATES
+
+
+# ---------------------------------------------------------------------------
+# RunState round-trip for all members
+# ---------------------------------------------------------------------------
+
+class TestRunStateRoundTrip:
+    @pytest.mark.parametrize("state", list(RunState))
+    def test_round_trip(self, state, tmp_path):
+        path = tmp_path / f"status_{state.value}.json"
+        write_status(path, AttemptStatus(state=state))
+        s2 = read_status(path)
+        assert s2.state == state
+
+
+# ---------------------------------------------------------------------------
+# RETRYABLE_REASONS membership
+# ---------------------------------------------------------------------------
+
+class TestRetryableReasons:
+    @pytest.mark.parametrize("reason", [
+        FailureReason.TIMEOUT,
+        FailureReason.OUT_OF_MEMORY,
+        FailureReason.SCHEDULER_FAILURE,
+        FailureReason.CHECKPOINT_MISSING,
+        FailureReason.NOT_CONVERGED,
+    ])
+    def test_expected_reasons_are_retryable(self, reason):
+        assert reason in RETRYABLE_REASONS
+
+    def test_bad_parameters_is_not_retryable(self):
+        assert FailureReason.BAD_PARAMETERS not in RETRYABLE_REASONS
+
+    def test_checkpoint_incompatible_is_not_retryable(self):
+        assert FailureReason.CHECKPOINT_INCOMPATIBLE not in RETRYABLE_REASONS
+
+
+# ---------------------------------------------------------------------------
+# read_status error cases
+# ---------------------------------------------------------------------------
+
+class TestReadStatusErrors:
+    def test_file_not_found(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            read_status(tmp_path / "nonexistent.json")
+
+    def test_missing_state_key_raises_key_error(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text('{"type": "attempt"}')
+        with pytest.raises(KeyError):
+            read_status(path)
