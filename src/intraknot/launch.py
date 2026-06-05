@@ -158,6 +158,7 @@ def _build_single_script(
         "--account": slurm.basic.account,
         "--partition": slurm.main.partition,
         "--constraint": slurm.main.constraint,
+        "--gres": slurm.main.gres,
         "--time": slurm.main.time,
         "--mem": str(slurm.main.mem),
         "--ntasks": str(slurm.main.ntasks),
@@ -221,6 +222,7 @@ def _build_array_script(
         "--account": slurm.basic.account,
         "--partition": slurm.main.partition,
         "--constraint": slurm.main.constraint,
+        "--gres": slurm.main.gres,
         "--time": slurm.main.time,
         "--mem": str(slurm.main.mem),
         "--ntasks": str(slurm.main.ntasks),
@@ -242,8 +244,9 @@ def _build_array_script(
         f'RUNS_ROOT="{runs_root}"\n'
         "\n"
         "# Resolve run_id from runs.csv using SLURM_ARRAY_TASK_ID.\n"
+        "# Row number minus the header row equals the 1-based array task index.\n"
         "RUN_ID=$(awk -F',' -v id=\"$SLURM_ARRAY_TASK_ID\" "
-        "'NR>1 && $1==id {print $2}' \\\n"
+        "'NR>1 && NR-1==id {print $1}' \\\n"
         '    "$CAMPAIGN_DIR/runs.csv")\n'
         "\n"
         'if [[ -z "$RUN_ID" ]]; then\n'
@@ -296,6 +299,7 @@ def _build_exec_script(
         "--account": slurm.basic.account,
         "--partition": slurm.exec_.partition,
         "--constraint": slurm.exec_.constraint,
+        "--gres": slurm.exec_.gres,
         "--time": slurm.exec_.time,
         "--mem": str(slurm.exec_.mem),
         "--ntasks": str(slurm.exec_.ntasks),
@@ -349,23 +353,27 @@ def _algorithm_source_path(algorithm: str) -> Path:
     FileNotFoundError
         If no runner script for `algorithm` exists.
     """
+    # Fast path: real file on disk (editable installs and extracted wheels).
+    direct = Path(__file__).parent / "algorithm" / f"run_{algorithm}.py"
+    if direct.exists():
+        return direct
+
+    # Fallback: package may be inside a zip. Read bytes through
+    # importlib.resources and materialise them at the expected path so the
+    # returned path is always persistent (as_file temp paths are deleted when
+    # the context manager exits, which is before callers can use them).
     try:
-        ref = importlib.resources.files("intraknot.algorithm") / f"run_{algorithm}.py"
-        with importlib.resources.as_file(ref) as p:
-            src = Path(p)
-        if not src.exists():
-            raise FileNotFoundError(src)
-        return src
-    except (FileNotFoundError, TypeError):
-        # Fall back to path relative to this file for editable installs.
-        here = Path(__file__).parent
-        src = here / "algorithm" / f"run_{algorithm}.py"
-        if not src.exists():
-            raise FileNotFoundError(
-                f"No runner script found for algorithm {algorithm!r}. "
-                f"Expected: {src}"
-            )
-        return src
+        data = (
+            importlib.resources.files("intraknot.algorithm") / f"run_{algorithm}.py"
+        ).read_bytes()
+    except (FileNotFoundError, TypeError, AttributeError):
+        raise FileNotFoundError(
+            f"No runner script found for algorithm {algorithm!r}. "
+            f"Expected: {direct}"
+        )
+    direct.parent.mkdir(parents=True, exist_ok=True)
+    direct.write_bytes(data)
+    return direct
 
 
 def _copy_algorithm(src: Path, dest_dir: Path) -> None:
@@ -424,19 +432,22 @@ def _find_exec_script(
         if p.exists():
             return p
 
-    # Fall back to the bundled package.
-    try:
-        ref = importlib.resources.files("intraknot.algorithm") / f"{script_name}.py"
-        with importlib.resources.as_file(ref) as p:
-            src = Path(p)
-        if src.exists():
-            return src
-    except (FileNotFoundError, TypeError):
-        pass
-
+    # Fall back to the bundled package (editable and extracted-wheel installs).
     here = Path(__file__).parent
     bundled = here / "algorithm" / f"{script_name}.py"
     if bundled.exists():
+        return bundled
+
+    # Zip-based distribution: materialise the resource at the expected path.
+    try:
+        data = (
+            importlib.resources.files("intraknot.algorithm") / f"{script_name}.py"
+        ).read_bytes()
+    except (FileNotFoundError, TypeError, AttributeError):
+        pass
+    else:
+        bundled.parent.mkdir(parents=True, exist_ok=True)
+        bundled.write_bytes(data)
         return bundled
 
     raise FileNotFoundError(
@@ -593,7 +604,6 @@ def create_run(
     config_src: Optional[Path],
     runs_root: Path,
     campaigns_root: Path,
-    machine: Optional[MachineConfig] = None,
     scan_id: str = "",
     overrides: Optional[Dict[str, Any]] = None,
     run_uuid: Optional[_uuid_lib.UUID] = None,
@@ -624,8 +634,6 @@ def create_run(
         Parent directory where the run subdirectory is created.
     campaigns_root:
         Parent directory containing campaign subdirectories.
-    machine:
-        Unused; kept for call-site compatibility. Pass `None`.
     scan_id:
         Optional scan identifier. When non-empty, recorded in the campaign's
         `runs.csv` so that runs belonging to the same scan can be selected
@@ -1111,7 +1119,12 @@ def submit_job(run_dir: Path) -> str:
         check=True,
     )
     # sbatch output: "Submitted batch job 12345678"
-    job_id = proc.stdout.strip().split()[-1]
+    parts = proc.stdout.strip().split()
+    if not parts or parts[0:3] != ["Submitted", "batch", "job"]:
+        raise RuntimeError(
+            f"Unexpected sbatch output: {proc.stdout.strip()!r}"
+        )
+    job_id = parts[-1]
     (run_dir / "main" / "job_id.txt").write_text(job_id + "\n")
     return job_id
 
@@ -1225,6 +1238,11 @@ def submit_exec_job(run_dir: Path, script_name: str) -> str:
         text=True,
         check=True,
     )
-    job_id = proc.stdout.strip().split()[-1]
+    parts = proc.stdout.strip().split()
+    if not parts or parts[0:3] != ["Submitted", "batch", "job"]:
+        raise RuntimeError(
+            f"Unexpected sbatch output: {proc.stdout.strip()!r}"
+        )
+    job_id = parts[-1]
     (run_dir / "exec" / script_name / "job_id.txt").write_text(job_id + "\n")
     return job_id
