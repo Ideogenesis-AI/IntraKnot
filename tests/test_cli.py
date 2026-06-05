@@ -406,3 +406,390 @@ class TestRunDeleteAllCampaigns:
             ids_c2 = [r[0] for r in csv.reader(f) if r and r[0] != "run_id"]
         assert run_id not in ids_c1
         assert run_id in ids_c2
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared across new CLI test classes
+# ---------------------------------------------------------------------------
+
+def _make_env(tmp_path: Path) -> dict:
+    """Return a minimal directory layout (campaigns/, runs/) under tmp_path."""
+    (tmp_path / "campaigns").mkdir(exist_ok=True)
+    (tmp_path / "runs").mkdir(exist_ok=True)
+    return {}
+
+
+def _make_slurm_toml(run_dir: Path) -> None:
+    (run_dir / "slurm.toml").write_text(
+        "[basic]\n"
+        "[main]\npartition=\"cpu\"\ntime=\"01:00:00\"\nmem=\"8000\"\n"
+        "ntasks=1\nnodes=1\ncpus_per_task=4\n"
+        "[exec]\npartition=\"cpu\"\ntime=\"01:00:00\"\nmem=\"8000\"\n"
+        "ntasks=1\nnodes=1\ncpus_per_task=4\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign create/activate/deactivate/status
+# ---------------------------------------------------------------------------
+
+class TestCampaignCommands:
+    def test_campaign_create(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "create", "my_campaign",
+             "--campaigns-root", str(tmp_path / "campaigns")],
+        )
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / "campaigns" / "my_campaign").is_dir()
+
+    def test_campaign_create_duplicate_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        args = ["campaign", "create", "dup",
+                "--campaigns-root", str(tmp_path / "campaigns")]
+        runner.invoke(main, args)
+        result = runner.invoke(main, args)
+        assert result.exit_code != 0
+
+    def test_campaign_activate(self, tmp_path):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            td = Path(td)
+            result = runner.invoke(main, ["campaign", "activate", "c1"])
+            assert result.exit_code == 0
+            assert "c1" in result.output
+            assert (td / ".iknot_state").exists()
+            assert "c1" in (td / ".iknot_state").read_text()
+
+    def test_campaign_deactivate(self, tmp_path):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            td = Path(td)
+            runner.invoke(main, ["campaign", "activate", "c1"])
+            result = runner.invoke(main, ["campaign", "deactivate"])
+            assert result.exit_code == 0
+            assert "cleared" in result.output.lower()
+
+    def test_campaign_status_with_active(self, tmp_path):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path) as td:
+            td = Path(td)
+            runner.invoke(main, ["campaign", "activate", "campaign_x"])
+            result = runner.invoke(main, ["campaign", "status"])
+            assert result.exit_code == 0
+            assert "campaign_x" in result.output
+
+    def test_campaign_status_none_active(self, tmp_path):
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            result = runner.invoke(main, ["campaign", "status"])
+            assert result.exit_code == 0
+            assert "No active campaign" in result.output
+
+
+# ---------------------------------------------------------------------------
+# iknot run create --set
+# ---------------------------------------------------------------------------
+
+class TestRunCreateCLI:
+    def _setup(self, tmp_path: Path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(
+            main,
+            ["campaign", "create", "c1", "--campaigns-root", str(camps_root)],
+        )
+        return camps_root, runs_root, runner
+
+    def test_run_create_explicit_name(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "create", "my_run",
+             "--campaign", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert (runs_root / "my_run").is_dir()
+
+    def test_run_create_set_auto_naming(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "create",
+             "--campaign", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--set", "algorithm.max_bond=128"],
+        )
+        assert result.exit_code == 0, result.output
+        created = list(runs_root.iterdir())
+        assert len(created) == 1
+        assert "max_bond=128" in created[0].name
+
+    def test_run_create_scan_mode_multi_value(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "create",
+             "--campaign", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--scan", "chi_scan",
+             "--set", "algorithm.max_bond=64,128"],
+        )
+        assert result.exit_code == 0, result.output
+        created = list(runs_root.iterdir())
+        assert len(created) == 2
+
+    def test_run_create_scan_required_for_multi_value(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "create",
+             "--campaign", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--set", "algorithm.max_bond=64,128"],
+        )
+        assert result.exit_code != 0
+        assert "--scan" in result.output or "--scan" in (result.stderr or "")
+
+
+# ---------------------------------------------------------------------------
+# iknot run submit (mocked sbatch, missing run exits non-zero)
+# ---------------------------------------------------------------------------
+
+class TestRunSubmitCLI:
+    def _setup(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        _make_slurm_toml(runs_root / "r1")
+        return camps_root, runs_root, runner
+
+    def test_submit_missing_run_exits_nonzero(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["run", "submit", "nonexistent",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root)],
+        )
+        assert result.exit_code != 0
+
+    def test_submit_calls_sbatch(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        from unittest.mock import patch, MagicMock
+        mock_proc = MagicMock()
+        mock_proc.stdout = "Submitted batch job 9999999\n"
+        mock_proc.returncode = 0
+        with patch("intraknot.launch.subprocess.run", return_value=mock_proc):
+            result = runner.invoke(
+                main,
+                ["run", "submit", "r1",
+                 "--campaigns-root", str(camps_root),
+                 "--runs-root", str(runs_root)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "9999999" in result.output
+
+
+# ---------------------------------------------------------------------------
+# iknot run exec --local (IKNOT_ATTEMPT env var)
+# ---------------------------------------------------------------------------
+
+class TestRunExecCLI:
+    def _setup(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        _make_slurm_toml(runs_root / "r1")
+        # Create a minimal exec script.
+        exec_script = camps_root / "c1" / "algorithm" / "my_exec.py"
+        exec_script.parent.mkdir(parents=True, exist_ok=True)
+        exec_script.write_text("# exec script\n")
+        return camps_root, runs_root, runner
+
+    def test_exec_local_sets_iknot_attempt(self, tmp_path):
+        camps_root, runs_root, runner = self._setup(tmp_path)
+        captured_env = {}
+
+        def fake_run(cmd, **kwargs):
+            import subprocess
+            captured_env.update(kwargs.get("env", {}))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("intraknot.cli.subprocess.run", side_effect=fake_run):
+            result = runner.invoke(
+                main,
+                ["run", "exec", "my_exec", "r1",
+                 "--campaign", "c1",
+                 "--campaigns-root", str(camps_root),
+                 "--runs-root", str(runs_root),
+                 "--local",
+                 "--attempt", "attempt_01"],
+            )
+        assert result.exit_code == 0, result.output
+        assert captured_env.get("IKNOT_ATTEMPT") == "attempt_01"
+
+
+# ---------------------------------------------------------------------------
+# iknot collect run / campaign
+# ---------------------------------------------------------------------------
+
+class TestCollectCLI:
+    def _make_run(self, tmp_path, run_id="r1"):
+        from intraknot.status import RunState, write_status, MainStatus, FailureReason
+        from helpers import make_run_dir
+        return make_run_dir(tmp_path, run_id, state=RunState.COMPLETED)
+
+    def test_collect_run(self, tmp_path):
+        runs_root = tmp_path / "runs"
+        self._make_run(runs_root, "r1")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["collect", "run", "r1", "--runs-root", str(runs_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "r1" in result.output
+
+    def test_collect_run_missing_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["collect", "run", "nonexistent",
+             "--runs-root", str(tmp_path / "runs")],
+        )
+        assert result.exit_code != 0
+
+    def test_collect_campaign(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        from intraknot.launch import create_campaign, _register_run_in_campaign
+        from intraknot.status import RunState
+        from helpers import make_run_dir
+        camp_dir = create_campaign("c1", "", "dmrg", camps_root)
+        make_run_dir(runs_root, "r1", state=RunState.COMPLETED)
+        _register_run_in_campaign(camp_dir, "r1")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["collect", "campaign",
+             "--id", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Collected" in result.output
+
+
+# ---------------------------------------------------------------------------
+# iknot resume run / campaign
+# ---------------------------------------------------------------------------
+
+class TestResumeCLI:
+    def test_resume_run_no_submit(self, tmp_path):
+        from helpers import make_run_dir
+        from intraknot.status import RunState, FailureReason
+        runs_root = tmp_path / "runs"
+        make_run_dir(runs_root, "r1", state=RunState.FAILED,
+                     restartable=True, reason=FailureReason.TIMEOUT)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["resume", "run", "r1",
+             "--runs-root", str(runs_root),
+             "--no-submit"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "attempt" in result.output.lower()
+
+    def test_resume_run_missing_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["resume", "run", "nonexistent",
+             "--runs-root", str(tmp_path / "runs")],
+        )
+        assert result.exit_code != 0
+
+    def test_resume_campaign_no_submit(self, tmp_path):
+        from helpers import make_run_dir
+        from intraknot.launch import create_campaign, _register_run_in_campaign
+        from intraknot.status import RunState, FailureReason
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        camp_dir = create_campaign("c1", "", "dmrg", camps_root)
+        make_run_dir(runs_root, "r1", state=RunState.FAILED,
+                     restartable=True, reason=FailureReason.TIMEOUT)
+        _register_run_in_campaign(camp_dir, "r1")
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["resume", "campaign",
+             "--id", "c1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--no-submit"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "resumed" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# iknot cluster sync / show
+# ---------------------------------------------------------------------------
+
+class TestClusterCLI:
+    def test_cluster_sync_mocked(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        from intraknot.discover import ClusterDiscovery
+        fake_discovery = ClusterDiscovery(
+            partitions=[], features={},
+            discovered_at="2026-01-01T00:00:00", hostname="testhost"
+        )
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+
+        with patch("intraknot.cli.discover_cluster", return_value=fake_discovery):
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                ["cluster", "sync", "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "testhost" in result.output
+        assert (configs_dir / "cluster.yaml").exists()
+
+    def test_cluster_show_no_yaml_exits_nonzero(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["cluster", "show", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code != 0
+        assert "cluster sync" in result.output or "cluster.yaml" in result.output
