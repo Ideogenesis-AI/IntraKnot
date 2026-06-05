@@ -35,9 +35,12 @@ from intraknot.launch import (
     create_attempt,
     create_campaign,
     create_run,
+    delete_run,
     prepare_exec,
+    read_runs_by_filter,
     remove_run_from_all_campaigns,
     update_current,
+    write_array_slurm_script,
     write_exec_slurm_script,
     write_slurm_script,
 )
@@ -590,3 +593,170 @@ class TestWriteExecSlurmScript:
         text = write_exec_slurm_script(run_dir, "compute_sf", _make_machine()).read_text()
         assert "compute_sf.py" in text
         assert "--run-dir" in text
+
+
+# ---------------------------------------------------------------------------
+# create_run — additional coverage
+# ---------------------------------------------------------------------------
+
+class TestCreateRunExtended:
+    def _setup(self, tmp_path: Path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        create_campaign("mycampaign", "", "dmrg", campaigns_root)
+        return campaigns_root, runs_root
+
+    def test_create_run_with_config_src(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        config_file = _minimal_config_toml(tmp_path)
+        run_dir = create_run(
+            "run_cfg", "mycampaign", config_file,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        cfg_out = run_dir / "config.toml"
+        assert cfg_out.exists()
+        import tomllib
+        with open(cfg_out, "rb") as f:
+            data = tomllib.load(f)
+        assert data["geometry"]["lx"] == 16
+
+    def test_create_run_both_config_src_and_overrides_raises(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        config_file = _minimal_config_toml(tmp_path)
+        with pytest.raises(ValueError, match="at most one"):
+            create_run(
+                "run_conflict", "mycampaign", config_file,
+                runs_root=runs_root, campaigns_root=campaigns_root,
+                overrides={"model": {"J": 2.0}},
+            )
+
+    def test_create_run_scan_id_in_runs_csv(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        create_run(
+            "run_scan", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+            scan_id="chi_scan",
+        )
+        with open(campaigns_root / "mycampaign" / "runs.csv", newline="") as f:
+            rows = list(csv.DictReader(f))
+        matching = [r for r in rows if r["run_id"] == "run_scan"]
+        assert len(matching) == 1
+        assert matching[0]["scan_id"] == "chi_scan"
+
+
+# ---------------------------------------------------------------------------
+# read_runs_by_filter
+# ---------------------------------------------------------------------------
+
+class TestReadRunsByFilter:
+    def _make_csv(self, campaign_dir: Path, rows: list) -> None:
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        with open(campaign_dir / "runs.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "scan_id", "status"])
+            for r in rows:
+                writer.writerow(r)
+
+    def test_no_filter_returns_all(self, tmp_path):
+        cd = tmp_path / "c1"
+        self._make_csv(cd, [["r1", "s1", "pending"], ["r2", "s1", "failed"]])
+        ids = read_runs_by_filter(cd)
+        assert ids == ["r1", "r2"]
+
+    def test_scan_id_filter(self, tmp_path):
+        cd = tmp_path / "c1"
+        self._make_csv(cd, [["r1", "s1", "pending"], ["r2", "s2", "pending"]])
+        ids = read_runs_by_filter(cd, scan_id="s1")
+        assert ids == ["r1"]
+
+    def test_status_filter(self, tmp_path):
+        cd = tmp_path / "c1"
+        self._make_csv(cd, [["r1", "", "pending"], ["r2", "", "failed"]])
+        ids = read_runs_by_filter(cd, status="failed")
+        assert ids == ["r2"]
+
+    def test_combined_filter(self, tmp_path):
+        cd = tmp_path / "c1"
+        self._make_csv(cd, [
+            ["r1", "s1", "pending"],
+            ["r2", "s1", "failed"],
+            ["r3", "s2", "failed"],
+        ])
+        ids = read_runs_by_filter(cd, scan_id="s1", status="failed")
+        assert ids == ["r2"]
+
+    def test_missing_csv_returns_empty(self, tmp_path):
+        ids = read_runs_by_filter(tmp_path / "nonexistent")
+        assert ids == []
+
+
+# ---------------------------------------------------------------------------
+# delete_run
+# ---------------------------------------------------------------------------
+
+class TestDeleteRun:
+    def _make_campaign_csv(self, campaigns_root: Path, campaign_id: str, run_ids: list) -> Path:
+        campaign_dir = campaigns_root / campaign_id
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        with open(campaign_dir / "runs.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "scan_id", "status"])
+            for rid in run_ids:
+                writer.writerow([rid, "", "pending"])
+        return campaign_dir
+
+    def test_deregisters_from_campaign_csv(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        run_dir = runs_root / "my_run"
+        run_dir.mkdir(parents=True)
+        campaign_dir = self._make_campaign_csv(campaigns_root, "c1", ["my_run"])
+
+        delete_run(run_dir, campaign_dir=campaign_dir)
+
+        with open(campaign_dir / "runs.csv", newline="") as f:
+            ids = [r[0] for r in csv.reader(f) if r and r[0] != "run_id"]
+        assert "my_run" not in ids
+        assert run_dir.exists()
+
+    def test_delete_dir_removes_directory(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        run_dir = runs_root / "my_run"
+        run_dir.mkdir(parents=True)
+        self._make_campaign_csv(campaigns_root, "c1", ["my_run"])
+        self._make_campaign_csv(campaigns_root, "c2", ["my_run"])
+
+        delete_run(run_dir, delete_dir=True, campaigns_root=campaigns_root)
+
+        assert not run_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# write_array_slurm_script
+# ---------------------------------------------------------------------------
+
+class TestWriteArraySlurmScript:
+    def test_creates_file_with_array_directive(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+
+        script = write_array_slurm_script(camp_dir, runs_root, _make_machine(), "1-5")
+
+        assert script.name == "submit_array.slurm"
+        assert script.exists()
+        text = script.read_text()
+        assert "#SBATCH --array=1-5" in text
+
+    def test_script_uses_row_number_for_run_id_lookup(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+
+        script = write_array_slurm_script(camp_dir, runs_root, _make_machine(), "1-3")
+        text = script.read_text()
+
+        # After the fix the awk expr is NR-1==id (row-based), not $1==id.
+        assert "NR-1==id" in text
+        assert "print $1" in text
