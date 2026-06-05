@@ -181,7 +181,7 @@ def _node_prefix(name: str) -> str:
     `"th-cl-hua[01-29]"` → `"th-cl-hua"`
     `"th-cl-rome01n[1-4]"` → `"th-cl-rome01n"`
     `"node42"` → `"node"`
-    `"cip-cl-computea"` → `"cip-cl-compute"`
+    `"cip-cl-computea"` → `"cip-cl-computea"` (trailing `"a"` follows `"e"`, not a digit — not stripped)
 
     The rule is: strip a trailing `[...]` bracket range if present, then
     strip any remaining trailing alphanumeric suffix that consists only of
@@ -275,8 +275,6 @@ def _compress_nodelist(names: List[str]) -> str:
             start = end = n
     ranges.append(_fmt_range(start, end, width))
 
-    if len(numbers) == 1:
-        return f"{prefix}{numbers[0]:0{width}d}" if width else f"{prefix}{numbers[0]}"
     return f"{prefix}[{','.join(ranges)}]"
 
 
@@ -399,11 +397,15 @@ def _count_nodes_in_bracket(nodelist: str) -> int:
 
     Examples: `"node01"` → 1, `"node[01-05]"` → 5,
     `"node[01-03,07]"` → 4.
+
+    Comma-joined fallback strings produced by `_compress_nodelist` for
+    mixed-prefix groups (e.g. `"alpha,beta"`) are counted by splitting on
+    commas, since each element is a single node name.
     """
     m = re.match(r"^[^\[]+\[([^\]]+)\]$", nodelist)
     if not m:
-        # Single node or plain name.
-        return 1
+        # Either a single node name or a comma-joined fallback list.
+        return len(nodelist.split(",")) if "," in nodelist else 1
     total = 0
     for segment in m.group(1).split(","):
         segment = segment.strip()
