@@ -51,8 +51,6 @@ falls back to `"vi"` if the key or file is absent.
 from __future__ import annotations
 
 import csv
-import json
-import os
 import subprocess
 import tomllib
 from dataclasses import dataclass
@@ -68,6 +66,9 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, Label, ListItem, ListView, Static
+
+from .collect import _current_attempt_dir, _read_json
+from .config import resolve_active_campaign
 
 
 ROWS_PER_PAGE = 6
@@ -134,34 +135,6 @@ class RunRow:
 # Low-level helpers
 # ---------------------------------------------------------------------------
 
-def _read_json(path: Path) -> Optional[dict]:
-    """Read a JSON file; return None if absent or malformed."""
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def _current_attempt_dir(run_dir: Path) -> Optional[Path]:
-    """Resolve `main/current` to an absolute attempt directory path.
-
-    Follows the symlink or falls back to `main/current.txt`.
-    """
-    main_dir = run_dir / "main"
-    current = main_dir / "current"
-    if current.is_symlink():
-        target = (main_dir / current.readlink()).resolve()
-        return target if target.exists() else None
-    txt = main_dir / "current.txt"
-    if txt.exists():
-        name = txt.read_text().strip()
-        candidate = main_dir / "attempts" / name
-        return candidate if candidate.exists() else None
-    return None
-
-
 def _fmt_section(data: dict) -> str:
     """Format a config section as left-aligned key = value lines.
 
@@ -224,12 +197,14 @@ def load_run_rows(
         current_attempt = status_data.get("current_attempt")
         restartable = bool(status_data.get("restartable", False))
 
+        # Resolve current attempt directory once; reused for both observables
+        # and the log path to avoid the overhead of a second filesystem traversal.
+        attempt_dir = _current_attempt_dir(run_dir)
+
         # Observables: try the collected summary first, then the current attempt.
         info_data = _read_json(run_dir / "summary" / "info.json") or {}
-        if not info_data:
-            attempt_dir = _current_attempt_dir(run_dir)
-            if attempt_dir:
-                info_data = _read_json(attempt_dir / "info.json") or {}
+        if not info_data and attempt_dir:
+            info_data = _read_json(attempt_dir / "info.json") or {}
 
         converged: Optional[bool] = info_data.get("converged")
         n_sweeps: Optional[int] = info_data.get("n_sweeps")
@@ -247,7 +222,6 @@ def load_run_rows(
 
         # Log path: alice.log inside the current attempt directory.
         log_path: Optional[Path] = None
-        attempt_dir = _current_attempt_dir(run_dir)
         if attempt_dir:
             candidate = attempt_dir / "alice.log"
             if candidate.exists():
@@ -297,26 +271,8 @@ def _read_tui_config(configs_dir: Path) -> dict:
 
 
 def _resolve_active_campaign() -> Optional[str]:
-    """Resolve the active campaign from env var or `.iknot_state` TOML.
-
-    Resolution order mirrors the CLI:
-
-    1. `INTRAKNOT_CAMPAIGN` environment variable.
-    2. `active_campaign` key in `.iknot_state`.
-    3. `None` — no active campaign.
-    """
-    env_val = os.environ.get("INTRAKNOT_CAMPAIGN")
-    if env_val:
-        return env_val
-    state_file = Path.cwd() / ".iknot_state"
-    if state_file.exists():
-        try:
-            with open(state_file, "rb") as f:
-                state = tomllib.load(f)
-            return state.get("active_campaign")
-        except Exception:
-            pass
-    return None
+    """Resolve the active campaign; delegates to `config.resolve_active_campaign`."""
+    return resolve_active_campaign()
 
 
 # ---------------------------------------------------------------------------
