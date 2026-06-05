@@ -35,6 +35,7 @@ shell.  `iknot campaign deactivate` clears both.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -56,6 +57,7 @@ from .config import (
     load_campaign_defaults,
     load_machine_config,
     make_run_id,
+    resolve_active_campaign as _resolve_active_campaign_base,
     write_data_gitignore,
     write_paths_toml,
     write_tui_toml,
@@ -115,12 +117,11 @@ def _resolve_active_campaign() -> tuple[Optional[str], str]:
 
     Returns `(None, "none")` when no campaign is active.
     """
-    env_val = os.environ.get("INTRAKNOT_CAMPAIGN")
-    if env_val:
-        return env_val, "env"
-    state = _read_state()
-    if "active_campaign" in state:
-        return state["active_campaign"], "file"
+    if os.environ.get("INTRAKNOT_CAMPAIGN"):
+        return os.environ["INTRAKNOT_CAMPAIGN"], "env"
+    campaign_id = _resolve_active_campaign_base()
+    if campaign_id is not None:
+        return campaign_id, "file"
     return None, "none"
 
 
@@ -167,6 +168,70 @@ def _resolve_campaign_dir(
     if campaign_id is None:
         return None
     return Path(campaigns_root) / campaign_id
+
+
+def _resolve_run_ids(
+    run_id: Optional[str],
+    scan_id: Optional[str],
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    status_filter: Optional[str] = None,
+) -> Optional[list[str]]:
+    """Return the list of run IDs to operate on, or `None` on error.
+
+    When `run_id` is given, returns `[run_id]`. When `scan_id` is given,
+    reads `runs.csv` from the active/specified campaign and returns matching
+    IDs. Prints an error to stderr and returns `None` if a required campaign
+    cannot be resolved.
+    """
+    if run_id is not None:
+        return [run_id]
+
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: --scan requires a campaign. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        return None
+
+    campaign_dir = Path(campaigns_root) / campaign_id
+    ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
+    if not ids:
+        click.echo(
+            f"No runs found for scan '{scan_id}'"
+            + (f" with status '{status_filter}'" if status_filter else "")
+            + "."
+        )
+        return []
+    return ids
+
+
+def _run_local_script(script: Path, extra_env: Optional[dict] = None) -> None:
+    """Execute a Slurm script locally with bash, stubbing Slurm env vars.
+
+    Parameters
+    ----------
+    script:
+        Path to the bash script to execute.
+    extra_env:
+        Additional environment variables merged on top of the current
+        environment. `SLURM_JOB_ID` and `SLURM_NODELIST` are stubbed
+        automatically if not already set.
+
+    Raises
+    ------
+    subprocess.CalledProcessError
+        If the script exits with a non-zero status.
+    """
+    env = os.environ.copy()
+    env.setdefault("SLURM_JOB_ID", "local")
+    env.setdefault("SLURM_NODELIST", "localhost")
+    if extra_env:
+        env.update(extra_env)
+    subprocess.run(["sh", str(script)], check=True, env=env)
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +317,6 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     # manual/ symlink — point to the installed package's manual directory so
     # that documentation is accessible at a predictable path in the project root.
     # Skipped when running from an editable install (no bundled manual/ in src/).
-    import importlib.util
     manual_link = cwd / "manual"
     if not manual_link.exists() and not manual_link.is_symlink():
         spec = importlib.util.find_spec("intraknot")
@@ -383,8 +447,6 @@ def grp_run() -> None:
               help="Campaign ID. Defaults to the active campaign.")
 @click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--runs-root", default="runs", show_default=True)
-@click.option("--machine", "machine_opt", default=None,
-              help="Path to configs/ directory. Defaults to ./configs.")
 def run_create(
     run_id: Optional[str],
     config_src: Optional[str],
@@ -393,7 +455,6 @@ def run_create(
     campaign_id: Optional[str],
     campaigns_root: str,
     runs_root: str,
-    machine_opt: Optional[str],
 ) -> None:
     """Create a new run directory.
 
@@ -433,9 +494,6 @@ def run_create(
             err=True,
         )
         sys.exit(1)
-    if run_id is not None and config_src is not None and using_set:
-        # --config with --set is also excluded (caught above), but keep guard.
-        pass
     if not run_id and not using_set:
         click.echo(
             "Error: provide either a RUN_ID or at least one --set override.",
@@ -448,8 +506,6 @@ def run_create(
             err=True,
         )
         sys.exit(1)
-
-    machine = _load_machine(machine_opt)
 
     if using_set:
         # Auto-naming mode: use --set overrides to build config and run ID.
@@ -486,7 +542,6 @@ def run_create(
                     config_src=None,
                     runs_root=Path(runs_root),
                     campaigns_root=campaigns_root_path,
-                    machine=machine,
                     scan_id=scan_id or "",
                     overrides=nested_overrides,
                     run_uuid=run_uuid,
@@ -517,7 +572,6 @@ def run_create(
                 config_src=config_path,
                 runs_root=Path(runs_root),
                 campaigns_root=Path(campaigns_root),
-                machine=machine,
             )
             click.echo(f"Created run: {run_dir}")
         except (FileExistsError, FileNotFoundError) as e:
@@ -569,29 +623,11 @@ def run_start(
         sys.exit(1)
 
     machine = _load_machine(machine_opt)
-
-    # Resolve the list of run IDs to start.
-    if scan_id is not None:
-        if campaign_id is None:
-            campaign_id, _ = _resolve_active_campaign()
-        if campaign_id is None:
-            click.echo(
-                "Error: --scan requires a campaign. "
-                "Use --campaign or `iknot campaign activate <id>`.",
-                err=True,
-            )
-            sys.exit(1)
-        campaign_dir = Path(campaigns_root) / campaign_id
-        run_ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
-        if not run_ids:
-            click.echo(
-                f"No runs found for scan '{scan_id}'"
-                + (f" with status '{status_filter}'" if status_filter else "")
-                + "."
-            )
-            return
-    else:
-        run_ids = [run_id]
+    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter)
+    if run_ids is None:
+        sys.exit(1)
+    if not run_ids:
+        return
 
     error_code = 0
     for rid in run_ids:
@@ -604,10 +640,7 @@ def run_start(
             script = write_slurm_script(run_dir, machine, rid)
             click.echo(f"Wrote Slurm script: {script}")
             click.echo(f"Starting run: {run_dir}")
-            env = os.environ.copy()
-            env.setdefault("SLURM_JOB_ID", "local")
-            env.setdefault("SLURM_NODELIST", "localhost")
-            subprocess.run(["sh", str(script)], check=True, env=env)
+            _run_local_script(script)
         except subprocess.CalledProcessError as e:
             click.echo(f"Script exited with status {e.returncode}.", err=True)
             error_code = e.returncode
@@ -657,29 +690,11 @@ def run_submit(
         sys.exit(1)
 
     machine = _load_machine(machine_opt)
-
-    # Resolve the list of run IDs to submit.
-    if scan_id is not None:
-        if campaign_id is None:
-            campaign_id, _ = _resolve_active_campaign()
-        if campaign_id is None:
-            click.echo(
-                "Error: --scan requires a campaign. "
-                "Use --campaign or `iknot campaign activate <id>`.",
-                err=True,
-            )
-            sys.exit(1)
-        campaign_dir = Path(campaigns_root) / campaign_id
-        run_ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
-        if not run_ids:
-            click.echo(
-                f"No runs found for scan '{scan_id}'"
-                + (f" with status '{status_filter}'" if status_filter else "")
-                + "."
-            )
-            return
-    else:
-        run_ids = [run_id]
+    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter)
+    if run_ids is None:
+        sys.exit(1)
+    if not run_ids:
+        return
 
     any_error = False
     for rid in run_ids:
@@ -703,7 +718,7 @@ def run_submit(
 
 @grp_run.command("exec")
 @click.argument("script_name")
-@click.argument("run_id", required=False, default=None)
+@click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
 @click.option("--campaigns-root", default="campaigns", show_default=True)
 @click.option("--campaign", "campaign_id", default=None,
@@ -718,7 +733,7 @@ def run_submit(
                    "(e.g. attempt_01). Passed as --attempt to the script.")
 def run_exec(
     script_name: str,
-    run_id: Optional[str],
+    run_id: str,
     runs_root: str,
     campaigns_root: str,
     campaign_id: Optional[str],
@@ -742,10 +757,6 @@ def run_exec(
     """
     machine = _load_machine(machine_opt)
 
-    # Resolve run directory.
-    if run_id is None:
-        click.echo("Error: RUN_ID is required.", err=True)
-        sys.exit(1)
     run_dir = Path(runs_root) / run_id
     if not run_dir.exists():
         click.echo(f"Error: run directory not found: {run_dir}", err=True)
@@ -768,16 +779,10 @@ def run_exec(
 
         if local:
             click.echo(f"Running exec job locally: {script_name}")
-            env = os.environ.copy()
-            env.setdefault("SLURM_JOB_ID", "local")
-            env.setdefault("SLURM_NODELIST", "localhost")
-            cmd = ["sh", str(script)]
+            extra: dict = {}
             if attempt:
-                # Append --attempt to the shell invocation via env var so the
-                # script can pick it up; alternatively, scripts read it from
-                # IKNOT_ATTEMPT.
-                env["IKNOT_ATTEMPT"] = attempt
-            subprocess.run(cmd, check=True, env=env)
+                extra["IKNOT_ATTEMPT"] = attempt
+            _run_local_script(script, extra_env=extra or None)
         else:
             job_id = submit_exec_job(run_dir, script_name)
             click.echo(f"Submitted exec job '{script_name}': {job_id}")
@@ -1089,15 +1094,6 @@ def cluster_sync(machine_opt: Optional[str]) -> None:
 
     save_discovery(discovery, configs_dir)
 
-    total_nodes = sum(
-        sum(
-            1  # placeholder; _count_nodes handles the real count inside discover
-            for _ in p.node_groups
-        )
-        for p in discovery.partitions
-    )
-    # Report actual node count from the feature index (avoids duplicates
-    # for nodes that appear in multiple partitions).
     n_partitions = len(discovery.partitions)
     click.echo(
         f"Synced {n_partitions} partition(s) from {discovery.hostname} "
