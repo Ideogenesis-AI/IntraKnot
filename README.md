@@ -35,6 +35,8 @@ intraknot/
 │       ├── collect.py       # result and status collection
 │       ├── resume.py        # new-attempt creation for failed or interrupted runs
 │       ├── status.py        # status model definitions
+│       ├── discover.py      # cluster hardware discovery (sinfo)
+│       ├── tui.py           # interactive campaign dashboard
 │       └── algorithm/
 │           └── run_dmrg.py  # IntraKnot-aware DMRG runner
 ├── configs/                 # machine, path, and scheduler settings
@@ -51,10 +53,12 @@ intraknot/
 
 ```
 configs/
-├── machines.yaml   # YAML: registry of known clusters (labels, notes)
 ├── slurm.toml      # TOML: master Slurm template (copied to each campaign on creation)
-└── paths.toml      # TOML: run root, scratch, node-local scratch, Python executable
+├── paths.toml      # TOML: project root, scratch, node-local scratch, runner command
+└── tui.toml        # TOML: TUI settings (editor)
 ```
+
+`iknot cluster sync` additionally writes `configs/cluster.yaml` with the discovered partition and node-hardware information.
 
 `configs/slurm.toml` is the **master Slurm template**. It is copied verbatim to each campaign when `iknot campaign create` is run, and from there to each run when `iknot run create` is run. Users edit the campaign copy for campaign-wide settings (e.g. walltime for a given bond dimension), or the run copy for a single-run override. No merging happens — the copy in the run directory is what gets submitted.
 
@@ -93,10 +97,10 @@ Example `paths.toml`:
 
 ```toml
 [paths]
-run_root           = "/scratch/user/intraknot/runs"
-scratch_root       = "/scratch/user"
-node_local_scratch = "/tmp/$USER"
-python             = "uv run"
+project_root = "/scratch/user/intraknot/runs"
+scratch_root = "/scratch/user"
+scratch_node = "/tmp/$USER"
+command      = "uv run"
 ```
 
 ### Campaigns
@@ -105,7 +109,7 @@ A campaign records which runs belong together and why. Each campaign carries a `
 
 ```
 campaigns/heisenberg_dmrg_chi_scan/
-├── campaign.yaml       # YAML: id, description, algorithm, created_at
+├── campaign.yaml       # YAML: campaign_id, description, algorithm, created_at
 ├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
 ├── slurm.toml          # TOML: Slurm defaults for all runs (copied from configs/)
 ├── runs.csv            # CSV: parameter table and per-run status
@@ -118,13 +122,13 @@ campaigns/heisenberg_dmrg_chi_scan/
 
 `defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
-`runs.csv` maps array indices to run directories and tracks status:
+`runs.csv` is the run registry for the campaign, with three columns:
 
 ```csv
-array_id,run_id,L,chi,g,status
-1,heis_L64_chi064_g1.0,64,64,1.0,completed
-2,heis_L64_chi128_g1.0,64,128,1.0,completed
-3,heis_L64_chi256_g1.0,64,256,1.0,failed
+run_id,scan_id,status
+dmrg_heisenberg_chain_len=64_max_bond=64_a3f7b291,chi_study,completed
+dmrg_heisenberg_chain_len=64_max_bond=128_c91d4e02,chi_study,completed
+dmrg_heisenberg_chain_len=64_max_bond=256_7fb83a10,chi_study,failed
 ```
 
 ### Runs
@@ -133,7 +137,7 @@ A run is one simulation case, typically one parameter point. It carries its own 
 
 ```
 runs/heis_L64_chi128_g1.0/
-├── manifest.yaml        # YAML: run identity, campaign, algorithm, machine
+├── manifest.yaml        # YAML: run_id, campaign, algorithm, status, created_at, machine
 ├── config.toml          # TOML: physics-only config (geometry, model, algorithm, output)
 ├── slurm.toml           # TOML: Slurm resources (copied from campaign; edit before submit)
 ├── algorithm/
@@ -221,6 +225,7 @@ Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan
 | Situation | Action |
 |---|---|
 | Timeout, OOM, node failure, preemption | New attempt in the same `main/` |
+| Not converged — more sweeps needed | New attempt (resumes from last checkpoint) |
 | Changed Hamiltonian, lattice size, bond dimension, algorithm | New run in the same campaign |
 | Bug fix that changes scientific results | New run |
 | Wrong `config.toml` | Mark run as `invalid`; create corrected run |
@@ -233,7 +238,7 @@ Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan
 iknot init
 ```
 
-Creates `configs/`, `campaigns/`, `runs/`, and `notebooks/`, and writes template `configs/slurm.toml` and `configs/paths.toml` for the user to fill in. When run inside the IntraKnot source repository, each directory also receives a `.gitignore` that excludes its contents from git.
+Creates `configs/`, `campaigns/`, `runs/`, and `notebooks/`, and writes template `configs/slurm.toml`, `configs/paths.toml`, and `configs/tui.toml` for the user to fill in. Also creates a `manual/` symlink to the bundled documentation. When run inside the IntraKnot source repository, each directory also receives a `.gitignore` that excludes its contents from git.
 
 ### Campaign session
 
@@ -245,7 +250,7 @@ iknot campaign create heisenberg_dmrg_chi_scan \
     --algorithm dmrg
 
 iknot campaign activate heisenberg_dmrg_chi_scan
-# also prints: export INTRAKNOT_CAMPAIGN=heisenberg_dmrg_chi_scan
+# also prints instructions to run: export INTRAKNOT_CAMPAIGN=heisenberg_dmrg_chi_scan
 
 iknot campaign status   # shows active campaign and its source
 iknot campaign deactivate
@@ -285,8 +290,8 @@ iknot run exec compute_sf heis_L64_chi128_g1.0
 # Run locally without Slurm
 iknot run exec compute_sf heis_L64_chi128_g1.0 --local
 
-# Pin to a specific attempt (default: uses main/current)
-iknot run exec compute_sf heis_L64_chi128_g1.0 --attempt attempt_02
+# Pin to a specific attempt (only effective with --local; default: uses main/current)
+iknot run exec compute_sf heis_L64_chi128_g1.0 --local --attempt attempt_02
 ```
 
 The script `compute_sf.py` is searched for in:
