@@ -26,15 +26,21 @@ from intraknot.config import (
     SlurmBasicConfig,
     SlurmJobConfig,
     SlurmTomlConfig,
+    _infer_typed_value,
     _merge_defaults,
+    iter_scan_combinations,
     load_campaign_defaults,
     load_cluster_discovery,
     load_config,
     load_machine_config,
+    load_run_config,
     load_slurm_toml,
+    make_run_id,
+    parse_set_overrides,
     write_data_gitignore,
     write_paths_toml,
     write_slurm_toml,
+    write_tui_toml,
 )
 
 
@@ -314,3 +320,247 @@ class TestMergeDefaults:
         defaults = {"algorithm": {"max_bond": 64}}
         merged = _merge_defaults(None, defaults)
         assert merged["algorithm"]["max_bond"] == 64
+
+    def test_empty_dict_user_cfg_does_not_drop_defaults(self):
+        """Empty dict must not be treated as falsy — the bug was `if user_cfg:`."""
+        defaults = {"algorithm": {"max_bond": 64}}
+        merged = _merge_defaults({}, defaults)
+        assert merged["algorithm"]["max_bond"] == 64
+
+    def test_new_section_in_defaults_merged_automatically(self):
+        """Any section in defaults is merged, not only the four hardcoded ones."""
+        defaults = {"optimizer": {"lr": 0.01}}
+        merged = _merge_defaults(None, defaults)
+        assert merged["optimizer"]["lr"] == pytest.approx(0.01)
+
+
+# ---------------------------------------------------------------------------
+# _infer_typed_value
+# ---------------------------------------------------------------------------
+
+class TestInferTypedValue:
+    def test_bool_true(self):
+        assert _infer_typed_value("true", False) is True
+        assert _infer_typed_value("yes", False) is True
+        assert _infer_typed_value("1", False) is True
+
+    def test_bool_false(self):
+        assert _infer_typed_value("false", True) is False
+        assert _infer_typed_value("no", True) is False
+        assert _infer_typed_value("0", True) is False
+
+    def test_bool_invalid(self):
+        with pytest.raises(ValueError, match="bool"):
+            _infer_typed_value("maybe", True)
+
+    def test_int(self):
+        assert _infer_typed_value("42", 0) == 42
+        assert isinstance(_infer_typed_value("10", 1), int)
+
+    def test_int_invalid(self):
+        with pytest.raises(ValueError, match="int"):
+            _infer_typed_value("3.14", 0)
+
+    def test_float(self):
+        assert _infer_typed_value("3.14", 0.0) == pytest.approx(3.14)
+
+    def test_float_invalid(self):
+        with pytest.raises(ValueError, match="float"):
+            _infer_typed_value("abc", 1.0)
+
+    def test_str_passthrough(self):
+        assert _infer_typed_value("hello", "world") == "hello"
+
+    def test_list_ints(self):
+        parsed = _infer_typed_value("1,2,3", [0])
+        assert parsed == [1, 2, 3]
+
+    def test_list_floats(self):
+        parsed = _infer_typed_value("0.5,1.0", [0.0])
+        assert parsed == pytest.approx([0.5, 1.0])
+
+    def test_list_strings(self):
+        parsed = _infer_typed_value("a,b,c", ["x"])
+        assert parsed == ["a", "b", "c"]
+
+    def test_list_empty_reference_treats_as_str(self):
+        """Empty list reference → infer elements as strings."""
+        parsed = _infer_typed_value("x,y", [])
+        assert parsed == ["x", "y"]
+
+    def test_exception_chain_preserved_on_int(self):
+        """ValueError raised from int conversion should chain the original."""
+        try:
+            _infer_typed_value("notanint", 0)
+        except ValueError as exc:
+            assert exc.__cause__ is not None
+
+
+# ---------------------------------------------------------------------------
+# parse_set_overrides
+# ---------------------------------------------------------------------------
+
+class TestParseSetOverrides:
+    def _defaults(self):
+        return {"algorithm": {"max_bond": 64, "n_sweeps": 10}}
+
+    def test_basic_override(self):
+        ov = parse_set_overrides(["algorithm.max_bond=128"], self._defaults())
+        assert ov["algorithm"]["max_bond"] == 128
+
+    def test_multi_override(self):
+        ov = parse_set_overrides(
+            ["algorithm.max_bond=256", "algorithm.n_sweeps=20"],
+            self._defaults(),
+        )
+        assert ov["algorithm"]["max_bond"] == 256
+        assert ov["algorithm"]["n_sweeps"] == 20
+
+    def test_multi_value_raises(self):
+        with pytest.raises(ValueError):
+            parse_set_overrides(["algorithm.max_bond=64,128"], self._defaults())
+
+
+# ---------------------------------------------------------------------------
+# iter_scan_combinations
+# ---------------------------------------------------------------------------
+
+class TestIterScanCombinations:
+    def _defaults(self):
+        return {"algorithm": {"max_bond": 64, "n_sweeps": 10}}
+
+    def test_single_value_yields_one_item(self):
+        combos = list(iter_scan_combinations(["algorithm.max_bond=128"], self._defaults()))
+        assert len(combos) == 1
+        nested, flat = combos[0]
+        assert nested["algorithm"]["max_bond"] == 128
+        assert flat["max_bond"] == 128
+
+    def test_multi_value_cartesian_product(self):
+        combos = list(
+            iter_scan_combinations(["algorithm.max_bond=64,128,256"], self._defaults())
+        )
+        assert len(combos) == 3
+        bonds = [c[0]["algorithm"]["max_bond"] for c in combos]
+        assert bonds == [64, 128, 256]
+
+    def test_two_multi_value_cross_product(self):
+        combos = list(
+            iter_scan_combinations(
+                ["algorithm.max_bond=64,128", "algorithm.n_sweeps=5,10"],
+                self._defaults(),
+            )
+        )
+        assert len(combos) == 4
+
+    def test_malformed_arg_raises(self):
+        with pytest.raises(ValueError):
+            list(iter_scan_combinations(["badarg"], self._defaults()))
+
+
+# ---------------------------------------------------------------------------
+# write_tui_toml
+# ---------------------------------------------------------------------------
+
+class TestWriteTuiToml:
+    def test_creates_file_with_tui_section(self, tmp_path):
+        p = tmp_path / "tui.toml"
+        write_tui_toml(p)
+        assert p.exists()
+        text = p.read_text()
+        assert "[tui]" in text
+        assert "editor" in text
+
+    def test_is_valid_toml(self, tmp_path):
+        import tomllib
+        p = tmp_path / "tui.toml"
+        write_tui_toml(p)
+        with open(p, "rb") as f:
+            data = tomllib.load(f)
+        assert "tui" in data
+
+
+# ---------------------------------------------------------------------------
+# make_run_id
+# ---------------------------------------------------------------------------
+
+class TestMakeRunId:
+    def _cfg(self, lx: int = 20, max_bond: int = 64, label: str = "Heisenberg") -> dict:
+        return {
+            "geometry": {"lattice": "chain", "lx": lx},
+            "model": {"label": label},
+            "algorithm": {"engine": "dmrg", "max_bond": max_bond},
+        }
+
+    def test_basic_1d_id(self):
+        rid = make_run_id(self._cfg(), {}, "abcd1234")
+        assert "dmrg" in rid
+        assert "heisenberg" in rid
+        assert "chain_len=20" in rid
+        assert "abcd1234" in rid
+
+    def test_2d_lattice(self):
+        cfg = {
+            "geometry": {"lattice": "square", "lx": 4, "ly": 4},
+            "model": {"label": "Hubbard"},
+            "algorithm": {"engine": "dmrg", "max_bond": 128},
+        }
+        rid = make_run_id(cfg, {}, "deadbeef")
+        assert "square_cell=4x4" in rid
+
+    def test_overrides_appear_in_id(self):
+        rid = make_run_id(self._cfg(max_bond=128), {"max_bond": 128}, "00000000")
+        assert "max_bond=128" in rid
+
+    def test_uuid8_suffix(self):
+        rid = make_run_id(self._cfg(), {}, "cafe1234")
+        assert rid.endswith("cafe1234")
+
+
+# ---------------------------------------------------------------------------
+# load_run_config
+# ---------------------------------------------------------------------------
+
+class TestLoadRunConfig:
+    def test_reads_config_toml(self, tmp_path):
+        (tmp_path / "config.toml").write_text(
+            '[model]\nlabel = "Heisenberg"\n[algorithm]\nmax_bond = 64\n'
+        )
+        cfg = load_run_config(tmp_path)
+        assert cfg["model"]["label"] == "Heisenberg"
+        assert cfg["algorithm"]["max_bond"] == 64
+
+    def test_raises_when_absent(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            load_run_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# gres field in SlurmJobConfig
+# ---------------------------------------------------------------------------
+
+class TestSlurmJobConfigGres:
+    def test_default_gres_is_empty_string(self):
+        cfg = SlurmJobConfig()
+        assert cfg.gres == ""
+
+    def test_gres_round_trip_via_load(self, tmp_path):
+        p = tmp_path / "slurm.toml"
+        p.write_text('[basic]\n[main]\ngres = "gpu:a100:2"\n[exec]\n')
+        cfg = load_slurm_toml(p)
+        assert cfg.main.gres == "gpu:a100:2"
+
+    def test_gres_emitted_in_script(self, tmp_path):
+        from intraknot.launch import write_slurm_script
+        from helpers import make_machine
+        run_dir = tmp_path / "run01"
+        (run_dir / "main" / "logs").mkdir(parents=True)
+        p = run_dir / "slurm.toml"
+        p.write_text(
+            '[basic]\n'
+            '[main]\npartition="gpu"\ntime="02:00:00"\nmem="32000"\n'
+            'ntasks=1\nnodes=1\ncpus_per_task=8\ngres="gpu:a100:1"\n'
+            '[exec]\n'
+        )
+        script = write_slurm_script(run_dir, make_machine(), "run01")
+        assert "--gres=gpu:a100:1" in script.read_text()
