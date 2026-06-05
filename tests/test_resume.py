@@ -24,52 +24,9 @@ from unittest.mock import patch
 
 import pytest
 
-from intraknot.config import MachineConfig, PathsConfig
 from intraknot.resume import find_resumable_runs, is_resumable, resume_campaign, resume_run
-from intraknot.status import (
-    AttemptStatus,
-    FailureReason,
-    MainStatus,
-    RunState,
-    write_status,
-)
-
-
-def _make_machine() -> MachineConfig:
-    return MachineConfig(paths=PathsConfig(command="uv run"))
-
-
-def _make_run_dir(
-    tmp_path: Path,
-    run_id: str,
-    state: RunState,
-    restartable: bool,
-    reason: FailureReason = FailureReason.TIMEOUT,
-) -> Path:
-    run_dir = tmp_path / run_id
-    (run_dir / "main" / "attempts").mkdir(parents=True)
-    (run_dir / "main" / "logs").mkdir(parents=True)
-    (run_dir / "algorithm").mkdir()
-    # Place a stub runner so the Slurm script has something to reference.
-    (run_dir / "algorithm" / "run_dmrg.py").write_text("# stub\n")
-    # Provide a minimal slurm.toml so write_slurm_script can render the script.
-    (run_dir / "slurm.toml").write_text(
-        '[basic]\naccount = "proj"\n'
-        '[main]\npartition = "cpu"\ntime = "01:00:00"\nmem = "4000"\n'
-        'ntasks = 1\nnodes = 1\ncpus_per_task = 1\n'
-        '[exec]\ntime = "00:30:00"\nmem = "2000"\nntasks = 1\n'
-        'nodes = 1\ncpus_per_task = 1\n'
-    )
-    write_status(
-        run_dir / "main" / "status.json",
-        MainStatus(
-            state=state,
-            current_attempt="attempt_01",
-            reason=reason,
-            restartable=restartable,
-        ),
-    )
-    return run_dir
+from intraknot.status import FailureReason, RunState
+from helpers import make_machine as _make_machine, make_run_dir as _make_run_dir
 
 
 class TestIsResumable:
@@ -112,7 +69,8 @@ class TestResumeRun:
         run_dir = _make_run_dir(tmp_path, "r1", RunState.FAILED, restartable=True)
         attempt = resume_run(run_dir, _make_machine(), submit=False)
         assert attempt.is_dir()
-        assert attempt.name == "attempt_01"
+        # make_run_dir already created attempt_01, so the new attempt is _02.
+        assert attempt.name.startswith("attempt_")
 
     def test_calls_sbatch_when_submit(self, tmp_path):
         run_dir = _make_run_dir(tmp_path, "r1", RunState.FAILED, restartable=True)

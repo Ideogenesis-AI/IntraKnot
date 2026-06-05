@@ -18,44 +18,19 @@
 
 """Tests for src/intraknot/collect.py."""
 
-import json
+import csv as _csv
 from pathlib import Path
 
 import pytest
 
 from intraknot.collect import collect_campaign, collect_run
-from intraknot.status import AttemptStatus, FailureReason, MainStatus, RunState, write_status
+from intraknot.status import MainStatus, RunState, write_status
+from helpers import make_run_dir as _make_run_dir_full
 
 
 def _make_run_dir(tmp_path: Path, run_id: str, state: RunState, energy: float = -1.23) -> Path:
-    """Create a minimal but realistic run directory for testing."""
-    run_dir = tmp_path / run_id
-    (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
-    (run_dir / "summary").mkdir()
-
-    write_status(
-        run_dir / "main" / "status.json",
-        MainStatus(
-            state=state,
-            current_attempt="attempt_01",
-            reason=FailureReason.CONVERGED if state == RunState.COMPLETED else None,
-            restartable=state == RunState.FAILED,
-        ),
-    )
-
-    obs = {"energy": energy, "converged": state == RunState.COMPLETED, "n_sweeps": 5}
-    (run_dir / "main" / "attempts" / "attempt_01" / "info.json").write_text(
-        json.dumps(obs)
-    )
-
-    # current symlink
-    current = run_dir / "main" / "current"
-    try:
-        current.symlink_to(Path("attempts") / "attempt_01")
-    except OSError:
-        (run_dir / "main" / "current.txt").write_text("attempt_01\n")
-
-    return run_dir
+    """Thin wrapper around the shared `make_run_dir` for collect-specific use."""
+    return _make_run_dir_full(tmp_path, run_id, state=state, energy=energy)
 
 
 class TestCollectRun:
