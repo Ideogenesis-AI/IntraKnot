@@ -46,6 +46,7 @@ File format dispatch: `.toml` files are loaded with stdlib `tomllib`;
 from __future__ import annotations
 
 import itertools
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -102,6 +103,9 @@ class SlurmJobConfig:
         `--nodes` value.
     cpus_per_task:
         `--cpus-per-task` value (number of CPU threads).
+    gres:
+        Generic resource string passed verbatim to `--gres`
+        (e.g. `"gpu:a100:2"`). Leave empty to omit.
     """
 
     partition: str = ""
@@ -111,6 +115,7 @@ class SlurmJobConfig:
     ntasks: int = 1
     nodes: int = 1
     cpus_per_task: int = 8
+    gres: str = ""
 
 
 @dataclass
@@ -344,15 +349,18 @@ def load_slurm_toml(path: Path) -> SlurmTomlConfig:
         mail_user=basic_raw.get("mail_user", ""),
     )
 
+    _defaults = SlurmJobConfig()
+
     def _job(d: dict) -> SlurmJobConfig:
         return SlurmJobConfig(
-            partition=d.get("partition", ""),
-            constraint=d.get("constraint", ""),
-            time=d.get("time", "04:00:00"),
-            mem=str(d.get("mem", "16000")),
-            ntasks=int(d.get("ntasks", 1)),
-            nodes=int(d.get("nodes", 1)),
-            cpus_per_task=int(d.get("cpus_per_task", 8)),
+            partition=d.get("partition", _defaults.partition),
+            constraint=d.get("constraint", _defaults.constraint),
+            time=d.get("time", _defaults.time),
+            mem=str(d.get("mem", _defaults.mem)),
+            ntasks=int(d.get("ntasks", _defaults.ntasks)),
+            nodes=int(d.get("nodes", _defaults.nodes)),
+            cpus_per_task=int(d.get("cpus_per_task", _defaults.cpus_per_task)),
+            gres=d.get("gres", _defaults.gres),
         )
 
     return SlurmTomlConfig(basic=basic, main=_job(main_raw), exec_=_job(exec_raw))
@@ -664,13 +672,18 @@ def _infer_typed_value(raw: str, reference: Any) -> Any:
     if isinstance(reference, int):
         try:
             return int(raw)
-        except ValueError:
-            raise ValueError(f"Cannot parse {raw!r} as int")
+        except ValueError as e:
+            raise ValueError(f"Cannot parse {raw!r} as int") from e
     if isinstance(reference, float):
         try:
             return float(raw)
-        except ValueError:
-            raise ValueError(f"Cannot parse {raw!r} as float")
+        except ValueError as e:
+            raise ValueError(f"Cannot parse {raw!r} as float") from e
+    if isinstance(reference, list):
+        # Split on commas and apply element-wise inference using the type of
+        # the first element (or str when the reference list is empty).
+        element_ref = reference[0] if reference else ""
+        return [_infer_typed_value(item.strip(), element_ref) for item in raw.split(",")]
     # str or unknown: return as-is
     return raw
 
@@ -812,6 +825,29 @@ def iter_scan_combinations(
         yield nested, flat
 
 
+def resolve_active_campaign() -> Optional[str]:
+    """Return the active campaign identifier, or `None` if none is set.
+
+    Resolution order:
+
+    1. `INTRAKNOT_CAMPAIGN` environment variable.
+    2. `active_campaign` key in `.iknot_state` TOML at the current directory.
+    3. `None` — no active campaign.
+    """
+    env_val = os.environ.get("INTRAKNOT_CAMPAIGN")
+    if env_val:
+        return env_val
+    state_file = Path.cwd() / ".iknot_state"
+    if state_file.exists():
+        try:
+            with open(state_file, "rb") as f:
+                state = tomllib.load(f)
+            return state.get("active_campaign")
+        except Exception:
+            pass
+    return None
+
+
 def make_run_id(merged_cfg: Dict[str, Any], flat_overrides: Dict[str, Any], uuid8: str) -> str:
     """Build an auto-generated run identifier from merged config and overrides.
 
@@ -891,14 +927,16 @@ def _merge_defaults(
         Merged configuration dict.
     """
     merged: Dict[str, Any] = {}
-    if user_cfg:
+    if user_cfg is not None:
         merged.update(user_cfg)
 
-    # Apply campaign defaults for sections absent in the run config.
-    for section in ("geometry", "model", "algorithm", "output"):
-        if section in campaign_defaults and section not in merged:
+    # Apply campaign defaults for every section present in defaults.toml.
+    # Iterating over campaign_defaults.keys() means new sections (e.g.
+    # [optimizer]) are merged automatically without a code change here.
+    for section in campaign_defaults:
+        if section not in merged:
             merged[section] = dict(campaign_defaults[section])
-        elif section in campaign_defaults and section in merged:
+        else:
             # Merge key-by-key: run values win.
             base = dict(campaign_defaults[section])
             base.update(merged[section])
