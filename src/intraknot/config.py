@@ -103,6 +103,8 @@ class SlurmJobConfig:
         `--nodes` value.
     cpus_per_task:
         `--cpus-per-task` value (number of CPU threads).
+    threads_per_core:
+        `--threads-per-core` value. Set to `0` to omit the directive.
     gres:
         Generic resource string passed verbatim to `--gres`
         (e.g. `"gpu:a100:2"`). Leave empty to omit.
@@ -115,6 +117,7 @@ class SlurmJobConfig:
     ntasks: int = 1
     nodes: int = 1
     cpus_per_task: int = 8
+    threads_per_core: int = 0
     gres: str = ""
 
 
@@ -532,18 +535,20 @@ partition     = "_init_"    # target partition (queue)
 constraint    = "_init_"    # node constraint (-C); set "" to omit
 time          = "04:00:00"  # walltime (HH:MM:SS)
 mem           = "16000"     # memory per node (MB integer or e.g. "16G")
-ntasks        = 1           # --ntasks (1 for threaded jobs)
-nodes         = 1           # --nodes
-cpus_per_task = 8           # number of CPU threads
+ntasks           = 1           # --ntasks (1 for threaded jobs)
+nodes            = 1           # --nodes
+cpus_per_task    = 8           # number of CPU threads
+threads_per_core = 1           # --threads-per-core; set 0 to omit
 
 [exec]
-partition     = "_init_"    # can differ from [main] for lighter follow-up jobs
-constraint    = "_init_"    # set "" to omit
-time          = "01:00:00"
-mem           = "8000"
-ntasks        = 1
-nodes         = 1
-cpus_per_task = 4
+partition        = "_init_"    # can differ from [main] for lighter follow-up jobs
+constraint       = "_init_"    # set "" to omit
+time             = "01:00:00"
+mem              = "8000"
+ntasks           = 1
+nodes            = 1
+cpus_per_task    = 4
+threads_per_core = 1           # --threads-per-core; set 0 to omit
 """
 
 _PATHS_TOML_TEMPLATE = """\

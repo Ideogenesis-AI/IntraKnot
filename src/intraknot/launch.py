@@ -164,6 +164,9 @@ def _build_single_script(
         "--ntasks": str(slurm.main.ntasks),
         "--nodes": str(slurm.main.nodes),
         "--cpus-per-task": str(slurm.main.cpus_per_task),
+        "--threads-per-core": (
+            str(slurm.main.threads_per_core) if slurm.main.threads_per_core else ""
+        ),
         "--output": f"{log_dir}/slurm-%j.out",
         "--error": f"{log_dir}/slurm-%j.err",
         "--mail-type": slurm.basic.mail_type,
@@ -228,6 +231,9 @@ def _build_array_script(
         "--ntasks": str(slurm.main.ntasks),
         "--nodes": str(slurm.main.nodes),
         "--cpus-per-task": str(slurm.main.cpus_per_task),
+        "--threads-per-core": (
+            str(slurm.main.threads_per_core) if slurm.main.threads_per_core else ""
+        ),
         "--output": f"{log_dir}/slurm-%A_%a.out",
         "--error": f"{log_dir}/slurm-%A_%a.err",
         "--array": array_range,
@@ -305,6 +311,9 @@ def _build_exec_script(
         "--ntasks": str(slurm.exec_.ntasks),
         "--nodes": str(slurm.exec_.nodes),
         "--cpus-per-task": str(slurm.exec_.cpus_per_task),
+        "--threads-per-core": (
+            str(slurm.exec_.threads_per_core) if slurm.exec_.threads_per_core else ""
+        ),
         "--output": f"{log_dir}/slurm-%j.out",
         "--error": f"{log_dir}/slurm-%j.err",
         "--mail-type": slurm.basic.mail_type,
