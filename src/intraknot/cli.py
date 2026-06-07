@@ -49,7 +49,6 @@ from typing import Optional
 import click
 import yaml
 
-from .collect import collect_campaign, collect_run
 from .config import (
     MachineConfig,
     _merge_defaults,
@@ -176,6 +175,7 @@ def _resolve_run_ids(
     campaign_id: Optional[str],
     campaigns_root: str,
     status_filter: Optional[str] = None,
+    runs_root: Optional[str] = None,
 ) -> Optional[list[str]]:
     """Return the list of run IDs to operate on, or `None` on error.
 
@@ -198,7 +198,12 @@ def _resolve_run_ids(
         return None
 
     campaign_dir = Path(campaigns_root) / campaign_id
-    ids = read_runs_by_filter(campaign_dir, scan_id=scan_id, status=status_filter)
+    ids = read_runs_by_filter(
+        campaign_dir,
+        scan_id=scan_id,
+        status=status_filter,
+        runs_root=Path(runs_root) if runs_root else None,
+    )
     if not ids:
         click.echo(
             f"No runs found for scan '{scan_id}'"
@@ -623,7 +628,7 @@ def run_start(
         sys.exit(1)
 
     machine = _load_machine(machine_opt)
-    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter)
+    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter, runs_root)
     if run_ids is None:
         sys.exit(1)
     if not run_ids:
@@ -690,7 +695,7 @@ def run_submit(
         sys.exit(1)
 
     machine = _load_machine(machine_opt)
-    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter)
+    run_ids = _resolve_run_ids(run_id, scan_id, campaign_id, campaigns_root, status_filter, runs_root)
     if run_ids is None:
         sys.exit(1)
     if not run_ids:
@@ -865,52 +870,6 @@ def run_delete(
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# iknot collect
-# ---------------------------------------------------------------------------
-
-@main.group("collect")
-def grp_collect() -> None:
-    """Collect results and update statuses."""
-
-
-@grp_collect.command("run")
-@click.argument("run_id")
-@click.option("--runs-root", default="runs", show_default=True)
-def collect_run_cmd(run_id: str, runs_root: str) -> None:
-    """Collect results from a single run into its summary/ directory."""
-    run_dir = Path(runs_root) / run_id
-    if not run_dir.exists():
-        click.echo(f"Error: run not found: {run_dir}", err=True)
-        sys.exit(1)
-    summary = collect_run(run_dir)
-    click.echo(f"Run {run_id}: state={summary.get('state')} energy={summary.get('energy')}")
-
-
-@grp_collect.command("campaign")
-@click.option("--id", "campaign_id", default=None,
-              help="Campaign ID. Defaults to active campaign.")
-@click.option("--campaigns-root", default="campaigns", show_default=True)
-@click.option("--runs-root", default="runs", show_default=True)
-def collect_campaign_cmd(
-    campaign_id: Optional[str],
-    campaigns_root: str,
-    runs_root: str,
-) -> None:
-    """Collect results for all runs in a campaign."""
-    if campaign_id is None:
-        campaign_id, _ = _resolve_active_campaign()
-    if campaign_id is None:
-        click.echo("Error: no campaign specified.", err=True)
-        sys.exit(1)
-
-    campaign_dir = Path(campaigns_root) / campaign_id
-    summaries = collect_campaign(campaign_dir, Path(runs_root))
-    for s in summaries:
-        click.echo(f"  {s.get('run_id')}: {s.get('state')}")
-    click.echo(f"\nCollected {len(summaries)} run(s).")
 
 
 # ---------------------------------------------------------------------------
