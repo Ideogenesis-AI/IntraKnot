@@ -1,6 +1,6 @@
 # `iknot status`
 
-Prints a formatted status summary for a single run: execution state, current attempt, failure details, physical observables (if collected), and a table of all exec jobs.
+Prints a formatted status summary for a single run: execution state, current attempt, failure details, physical observables, and a table of all exec jobs.
 
 ## Common workflow
 
@@ -8,7 +8,6 @@ Prints a formatted status summary for a single run: execution state, current att
 # Check a run immediately after submission.
 iknot status chi128
 
-# Check again after collecting results (iknot collect run chi128).
 iknot status chi128
 ```
 
@@ -30,7 +29,7 @@ iknot status [OPTIONS] RUN_ID
 
 ### Output
 
-#### Example — completed run with collected observables
+#### Example — completed run
 
 ```
 Run             : chi128
@@ -80,8 +79,8 @@ Exec jobs:
 | `Reason` | `main/status.json` | Reason code from the latest attempt. `—` while pending or running. |
 | `Restartable` | `main/status.json` | Whether `iknot resume run` can create a new attempt. |
 | `Hostname` | `main/status.json` | Hostname of the node where the most recent attempt ran. `—` until the runner starts. |
-| `Energy` | `summary/info.json` | Ground-state energy from the latest collected result. Shown only when `summary/info.json` exists. |
-| `Converged` | `summary/info.json` | Convergence flag from the runner. Shown only when present. |
+| `Energy` | current attempt's `info.json` | Ground-state energy from the latest attempt. Shown only when available. |
+| `Converged` | current attempt's `info.json` | Convergence flag from the runner. Shown only when present. |
 | Exec jobs table | `exec/*/status.json` | One row per exec slot found under `exec/`. State is read from `exec/<name>/status.json`; shows `pending` if the file does not exist yet. |
 
 ### Run states
