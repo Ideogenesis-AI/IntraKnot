@@ -316,6 +316,26 @@ iknot status heis_L64_chi128_g1.0
 
 Prints primary job state, current attempt, energy and convergence, and a summary line for each exec job slot found under `exec/`.
 
+### Monitor campaigns (TUI)
+
+```bash
+iknot tui
+```
+
+Launches an interactive terminal dashboard for the active campaign. Displays a paginated run list with color-coded state indicators, a detail pane with geometry, model, and algorithm parameters, and log viewers for `iknot.log` and `alice.log`.
+
+| Key | Action |
+|---|---|
+| `c` | Switch campaign (overlay) |
+| `r` | Refresh run data from disk |
+| `l` | Open `iknot.log` for the selected run |
+| `a` | Open `alice.log` for the selected run |
+| `← →` | Page through the run list (6 rows per page) |
+| `↑ ↓` | Move the row cursor |
+| `q` | Quit |
+
+The log viewer suspends the dashboard, opens the file in the editor configured in `configs/tui.toml` (`tui.editor`; defaults to `vi`), then resumes when the editor exits. See [`manual/tui.md`](manual/tui.md) for full reference.
+
 ## Installation
 
 ```bash
