@@ -405,7 +405,7 @@ class RunDetail(Widget):
         if run is None:
             self.border_title = "Detail"
             status_widget.update("[dim]No run selected.[/dim]")
-            status_widget.styles.border = ("heavy", "grey50")
+            status_widget.styles.border = ("heavy", "grey")
             geo_widget.update("")
             model_widget.update("")
             algo_widget.update("")
