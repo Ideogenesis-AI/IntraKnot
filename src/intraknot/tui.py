@@ -158,7 +158,8 @@ class RunRow:
     geo_str: str = ""
     model_str: str = ""
     algo_str: str = ""
-    log_path: Optional[Path] = None
+    iknot_log_path: Optional[Path] = None
+    alice_log_path: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +250,16 @@ def load_run_rows(
             except Exception:
                 pass
 
-        # Log path: alice.log inside the current attempt directory.
-        log_path: Optional[Path] = None
+        # Log paths: iknot.log and alice.log inside the current attempt directory.
+        iknot_log_path: Optional[Path] = None
+        alice_log_path: Optional[Path] = None
         if attempt_dir:
-            candidate = attempt_dir / "alice.log"
-            if candidate.exists():
-                log_path = candidate
+            p = attempt_dir / "iknot.log"
+            if p.exists():
+                iknot_log_path = p
+            p = attempt_dir / "alice.log"
+            if p.exists():
+                alice_log_path = p
 
         rows.append(RunRow(
             run_id=run_id,
@@ -269,7 +274,8 @@ def load_run_rows(
             geo_str=_fmt_section(config_data.get("geometry", {})),
             model_str=_fmt_section(config_data.get("model", {})),
             algo_str=_fmt_section(config_data.get("algorithm", {})),
-            log_path=log_path,
+            iknot_log_path=iknot_log_path,
+            alice_log_path=alice_log_path,
         ))
 
     return rows
@@ -492,7 +498,8 @@ class DashboardApp(App):
     BINDINGS = [
         Binding("c", "campaign", "Campaign"),
         Binding("r", "refresh", "Refresh"),
-        Binding("l", "open_log", "Log"),
+        Binding("l", "open_iknot_log", "iknot.log"),
+        Binding("a", "open_alice_log", "alice.log"),
         # [ and ] are the clickable footer entries; key_display makes them
         # render as ← → so the UI stays intuitive.  The hidden priority
         # bindings on the actual arrow keys let users press ← → on the
@@ -675,15 +682,25 @@ class DashboardApp(App):
             self._cursor = 0
             self._reload()
 
-    def action_open_log(self) -> None:
+    def action_open_iknot_log(self) -> None:
+        """Suspend the TUI, open iknot.log in the configured editor, then resume."""
+        self._open_log_file("iknot_log_path", "iknot.log")
+
+    def action_open_alice_log(self) -> None:
         """Suspend the TUI, open alice.log in the configured editor, then resume."""
+        self._open_log_file("alice_log_path", "alice.log")
+
+    def _open_log_file(self, attr: str, filename: str) -> None:
+        """Shared logic for opening a log file in the configured editor."""
         run = self._selected_run()
         if run is None:
             self.notify("No run selected.", severity="warning")
             return
-        log_path = run.log_path
+        log_path: Optional[Path] = getattr(run, attr)
         if log_path is None:
-            self.notify(f"No alice.log found for {run.run_id}.", severity="warning")
+            self.notify(
+                f"No {filename} found for {run.run_id}.", severity="warning"
+            )
             return
         # suspend() hands the terminal back to the shell for the duration of
         # the editor subprocess and resumes the TUI when the editor exits.
