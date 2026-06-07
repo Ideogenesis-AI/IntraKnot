@@ -38,8 +38,7 @@ iknot run create --scan chi_study --set algorithm.max_bond=64,128,256,512
 # Submit all runs in the scan at once.
 iknot run submit --scan chi_study
 
-# After collecting results, resubmit only the failed ones.
-iknot collect campaign
+# Resubmit only the failed ones (status is read live from each run's main/status.json).
 iknot run submit --scan chi_study --status failed
 ```
 
@@ -110,7 +109,7 @@ runs/<RUN_ID>/
 │   ├── status.json         # initial state: {"state": "pending", ...}
 │   ├── attempts/           # one subdirectory per execution attempt
 │   └── logs/               # Slurm output and error logs
-└── summary/                # populated by iknot collect run
+└── summary/                # optional; may contain observables snapshots
 ```
 
 **`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.

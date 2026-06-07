@@ -5,8 +5,6 @@ Creates new execution attempts for runs that have failed in a retryable way (e.g
 ## Common workflow
 
 ```bash
-# After iknot collect campaign has updated run statuses:
-
 # Resume all retryable failures in the active campaign in one command.
 iknot resume campaign
 
