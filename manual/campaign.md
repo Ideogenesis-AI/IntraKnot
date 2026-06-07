@@ -54,7 +54,7 @@ campaigns/<CAMPAIGN_ID>/
 ├── campaign.yaml       # metadata: id, description, created timestamp
 ├── defaults.toml       # baseline physics/algorithm configuration for all runs
 ├── slurm.toml          # Slurm settings (copied from configs/slurm.toml)
-├── runs.csv            # run registry: run_id, scan_id, status columns
+├── runs.csv            # run registry: run_id, scan_id columns
 ├── notes.md            # free-form notes
 ├── logs/               # Slurm array job log files
 └── algorithm/
@@ -69,7 +69,7 @@ campaigns/<CAMPAIGN_ID>/
 
 ### `iknot campaign activate <CAMPAIGN_ID>`
 
-Sets `CAMPAIGN_ID` as the active campaign, so that `iknot run`, `iknot collect`, and `iknot resume` commands that do not specify `--campaign` automatically target it.
+Sets `CAMPAIGN_ID` as the active campaign, so that `iknot run` and `iknot resume` commands that do not specify `--campaign` automatically target it.
 
 #### Synopsis
 
