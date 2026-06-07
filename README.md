@@ -1,6 +1,6 @@
 # IntraKnot
 
-IntraKnot is a lightweight Python tool for managing tensor-network simulations on HPC clusters. It is the orchestration layer around an existing tensor-network package: it creates simulation directories, records parameters, submits Slurm jobs, tracks retries, collects results, and connects related runs through campaigns.
+IntraKnot is a lightweight Python tool for managing tensor-network simulations on HPC clusters. It is the orchestration layer around an existing tensor-network package: it creates simulation directories, records parameters, submits Slurm jobs, tracks retries, and connects related runs through campaigns.
 
 IntraKnot is built on top of [Nicole](https://github.com/Ideogenesis-AI/Nicole) and [Alice](https://github.com/Ideogenesis-AI/Alice), and integrates PyTorch for machine-learning-assisted many-body physics.
 
@@ -32,7 +32,6 @@ intraknot/
 │       ├── cli.py           # command-line interface (iknot)
 │       ├── config.py        # config loaders and template generators
 │       ├── launch.py        # directory creation and job submission
-│       ├── collect.py       # result and status collection
 │       ├── resume.py        # new-attempt creation for failed or interrupted runs
 │       ├── status.py        # status model definitions
 │       ├── discover.py      # cluster hardware discovery (sinfo)
@@ -112,7 +111,7 @@ campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: campaign_id, description, algorithm, created_at
 ├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
 ├── slurm.toml          # TOML: Slurm defaults for all runs (copied from configs/)
-├── runs.csv            # CSV: parameter table and per-run status
+├── runs.csv            # CSV: run registry (run_id, scan_id)
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
 └── algorithm/
@@ -122,14 +121,16 @@ campaigns/heisenberg_dmrg_chi_scan/
 
 `defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
-`runs.csv` is the run registry for the campaign, with three columns:
+`runs.csv` is the run registry for the campaign, with two columns:
 
 ```csv
-run_id,scan_id,status
-dmrg_heisenberg_chain_len=64_max_bond=64_a3f7b291,chi_study,completed
-dmrg_heisenberg_chain_len=64_max_bond=128_c91d4e02,chi_study,completed
-dmrg_heisenberg_chain_len=64_max_bond=256_7fb83a10,chi_study,failed
+run_id,scan_id
+dmrg_heisenberg_chain_len=64_max_bond=64_a3f7b291,chi_study
+dmrg_heisenberg_chain_len=64_max_bond=128_c91d4e02,chi_study
+dmrg_heisenberg_chain_len=64_max_bond=256_7fb83a10,chi_study
 ```
+
+Run state is always read live from each run's `main/status.json`.
 
 ### Runs
 
@@ -301,11 +302,9 @@ The script `compute_sf.py` is searched for in:
 
 Results land in `runs/<id>/exec/compute_sf/`. Each exec script receives `--run-dir` and is responsible for writing its own outputs and updating `exec/<name>/status.json`.
 
-### Collect results and retry failures
+### Retry failures
 
 ```bash
-iknot collect campaign --id heisenberg_dmrg_chi_scan
-
 iknot resume campaign --id heisenberg_dmrg_chi_scan
 ```
 
@@ -315,7 +314,7 @@ iknot resume campaign --id heisenberg_dmrg_chi_scan
 iknot status heis_L64_chi128_g1.0
 ```
 
-Prints primary job state, current attempt, energy and convergence (if collected), and a summary line for each exec job slot found under `exec/`.
+Prints primary job state, current attempt, energy and convergence, and a summary line for each exec job slot found under `exec/`.
 
 ## Installation
 
