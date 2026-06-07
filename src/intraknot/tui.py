@@ -51,6 +51,7 @@ falls back to `"vi"` if the key or file is absent.
 from __future__ import annotations
 
 import csv
+import json
 import subprocess
 import tomllib
 from dataclasses import dataclass
@@ -67,8 +68,38 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import DataTable, Footer, Header, Label, ListItem, ListView, Static
 
-from .collect import _current_attempt_dir, _read_json
 from .config import resolve_active_campaign
+
+
+def _read_json(path: Path) -> Optional[dict]:
+    """Read a JSON file, returning `None` if the file is absent or invalid."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _current_attempt_dir(run_dir: Path) -> Optional[Path]:
+    """Resolve `main/current` to an absolute attempt directory path.
+
+    Reads the symlink target or falls back to `main/current.txt`.
+    """
+    main_dir = run_dir / "main"
+    current = main_dir / "current"
+
+    if current.is_symlink():
+        target = (main_dir / current.readlink()).resolve()
+        return target if target.exists() else None
+
+    txt = main_dir / "current.txt"
+    if txt.exists():
+        name = txt.read_text().strip()
+        candidate = main_dir / "attempts" / name
+        return candidate if candidate.exists() else None
+
+    return None
 
 
 ROWS_PER_PAGE = 6
@@ -117,7 +148,6 @@ class RunRow:
 
     run_id: str
     scan_id: str
-    csv_status: str
     state: Optional[str] = None
     reason: Optional[str] = None
     current_attempt: Optional[str] = None
@@ -187,7 +217,6 @@ def load_run_rows(
             continue
 
         scan_id = row.get("scan_id", "").strip()
-        csv_status = row.get("status", "").strip()
         run_dir = runs_root / run_id
 
         # Main status (state, reason, current_attempt, restartable).
@@ -201,9 +230,9 @@ def load_run_rows(
         # and the log path to avoid the overhead of a second filesystem traversal.
         attempt_dir = _current_attempt_dir(run_dir)
 
-        # Observables: try the collected summary first, then the current attempt.
-        info_data = _read_json(run_dir / "summary" / "info.json") or {}
-        if not info_data and attempt_dir:
+        # Observables from the current attempt.
+        info_data = {}
+        if attempt_dir:
             info_data = _read_json(attempt_dir / "info.json") or {}
 
         converged: Optional[bool] = info_data.get("converged")
@@ -230,7 +259,6 @@ def load_run_rows(
         rows.append(RunRow(
             run_id=run_id,
             scan_id=scan_id,
-            csv_status=csv_status,
             state=state,
             reason=reason,
             current_attempt=current_attempt,
@@ -413,7 +441,7 @@ class RunDetail(Widget):
 
         self.border_title = f"Detail: {run.run_id}"
 
-        effective_state = run.state or run.csv_status or "pending"
+        effective_state = run.state or "pending"
         color = _STATE_COLORS.get(effective_state, "grey")
         icon = _STATE_ICONS.get(effective_state, "?")
 
@@ -561,7 +589,7 @@ class DashboardApp(App):
         page_runs = self._all_runs[start : start + ROWS_PER_PAGE]
 
         for run in page_runs:
-            effective_state = run.state or run.csv_status or "pending"
+            effective_state = run.state or "pending"
             icon = _STATE_ICONS.get(effective_state, "?")
             style = _STATE_STYLES.get(effective_state, "")
             state_cell = Text(f"{icon} {effective_state}", style=style)
