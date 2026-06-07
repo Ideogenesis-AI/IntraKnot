@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import json
 import importlib.resources
 import shutil
 import subprocess
@@ -585,10 +586,10 @@ def create_campaign(
     else:
         write_slurm_toml(slurm_dest)
 
-    # runs.csv — three-column parameter table.
+    # runs.csv — ordered manifest of registered runs.
     with open(campaign_dir / "runs.csv", "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["run_id", "scan_id", "status"])
+        writer.writerow(["run_id", "scan_id"])
 
     # notes.md — blank.
     (campaign_dir / "notes.md").write_text(f"# {campaign_id}\n\n")
@@ -751,9 +752,7 @@ def _register_run_in_campaign(
 ) -> None:
     """Append a row to the campaign's `runs.csv`.
 
-    Creates the file with a three-column header if it does not yet exist.
-    When an existing file has only the legacy two-column header (`run_id`,
-    `status`), a two-column row is appended for backward compatibility.
+    Creates the file with a two-column header if it does not yet exist.
 
     Parameters
     ----------
@@ -762,27 +761,15 @@ def _register_run_in_campaign(
     run_id:
         Run identifier to register.
     scan_id:
-        Scan identifier to record in the `scan_id` column. Ignored when the
-        file uses the legacy two-column format.
+        Scan identifier to record in the `scan_id` column.
     """
     runs_csv = campaign_dir / "runs.csv"
     if not runs_csv.exists():
         with open(runs_csv, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "scan_id", "status"])
+            writer.writerow(["run_id", "scan_id"])
 
-    # Detect the existing header to preserve backward compatibility.
-    with open(runs_csv, newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            header = []
-
-    has_scan_id_col = "scan_id" in header
-
-    # Guard against duplicate entries: read existing run_ids and skip if
-    # this run_id is already registered.
+    # Guard against duplicate entries.
     with open(runs_csv, newline="") as f:
         reader = csv.reader(f)
         next(reader, None)  # skip header
@@ -792,10 +779,7 @@ def _register_run_in_campaign(
 
     with open(runs_csv, "a", newline="") as f:
         writer = csv.writer(f)
-        if has_scan_id_col:
-            writer.writerow([run_id, scan_id, "pending"])
-        else:
-            writer.writerow([run_id, "pending"])
+        writer.writerow([run_id, scan_id])
 
 
 def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
@@ -822,7 +806,7 @@ def remove_run_from_campaign(campaign_dir: Path, run_id: str) -> bool:
 
     with open(runs_csv, newline="") as f:
         reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames or ["run_id", "status"])
+        fieldnames = list(reader.fieldnames or ["run_id", "scan_id"])
         rows = list(reader)
 
     kept = [r for r in rows if r.get("run_id", "").strip() != run_id]
@@ -871,6 +855,7 @@ def read_runs_by_filter(
     campaign_dir: Path,
     scan_id: Optional[str] = None,
     status: Optional[str] = None,
+    runs_root: Optional[Path] = None,
 ) -> List[str]:
     """Return run IDs from `runs.csv` matching optional scan and status filters.
 
@@ -880,10 +865,15 @@ def read_runs_by_filter(
         Campaign directory containing `runs.csv`.
     scan_id:
         When given, only rows whose `scan_id` column equals this value are
-        returned. Ignored when the file uses the legacy two-column format.
-    status:
-        When given, only rows whose `status` column equals this value are
         returned.
+    status:
+        When given, only runs whose live state (read from `main/status.json`)
+        equals this value are returned. Requires `runs_root`. Runs with no
+        `main/status.json` are treated as `"pending"`. Ignored when
+        `runs_root` is not provided.
+    runs_root:
+        Root directory containing run subdirectories. Required for `status`
+        filtering.
 
     Returns
     -------
@@ -905,8 +895,15 @@ def read_runs_by_filter(
             continue
         if scan_id is not None and row.get("scan_id", "").strip() != scan_id:
             continue
-        if status is not None and row.get("status", "").strip() != status:
-            continue
+        if status is not None and runs_root is not None:
+            # Read live state directly from main/status.json.
+            status_path = runs_root / run_id / "main" / "status.json"
+            try:
+                live_status = json.loads(status_path.read_text()).get("state", "pending")
+            except (OSError, json.JSONDecodeError, AttributeError):
+                live_status = "pending"
+            if live_status != status:
+                continue
         matches.append(run_id)
     return matches
 
