@@ -99,9 +99,30 @@ class TestCmdInit:
             assert result.exit_code == 0, result.output
             assert (tmpdir / "configs" / "slurm.toml").exists()
             assert (tmpdir / "configs" / "paths.toml").exists()
+            assert (tmpdir / "configs" / "tui.toml").exists()
             # machines.yaml is no longer created by init; cluster.yaml is
             # written by `iknot machine sync` instead.
             assert not (tmpdir / "configs" / "machines.yaml").exists()
+
+    def test_tui_toml_contains_editor_key(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmpdir:
+            tmpdir = Path(tmpdir)
+            result = runner.invoke(main, ["init"])
+            assert result.exit_code == 0, result.output
+            text = (tmpdir / "configs" / "tui.toml").read_text()
+            assert "[tui]" in text
+            assert "editor" in text
+
+    def test_does_not_overwrite_existing_tui_toml(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmpdir:
+            tmpdir = Path(tmpdir)
+            runner.invoke(main, ["init"])
+            tui_path = tmpdir / "configs" / "tui.toml"
+            tui_path.write_text('[tui]\neditor = "emacs"\n')
+            runner.invoke(main, ["init"])
+            assert tui_path.read_text() == '[tui]\neditor = "emacs"\n'
 
     def test_appends_iknot_state_to_root_gitignore(self):
         runner = CliRunner()
