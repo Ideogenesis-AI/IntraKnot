@@ -189,7 +189,8 @@ class TestCreateCampaign:
             reader = csv.reader(f)
             header = next(reader)
         assert "run_id" in header
-        assert "status" in header
+        assert "scan_id" in header
+        assert "status" not in header
 
     def test_raises_if_exists(self, tmp_path):
         campaigns_root = tmp_path / "campaigns"
@@ -310,9 +311,9 @@ class TestRemoveRunFromAllCampaigns:
         campaign_dir.mkdir(parents=True, exist_ok=True)
         with open(campaign_dir / "runs.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "scan_id", "status"])
+            writer.writerow(["run_id", "scan_id"])
             for rid in run_ids:
-                writer.writerow([rid, "", "pending"])
+                writer.writerow([rid, ""])
         return campaign_dir
 
     def test_removes_from_all_matching_campaigns(self, tmp_path):
@@ -650,39 +651,59 @@ class TestCreateRunExtended:
 
 class TestReadRunsByFilter:
     def _make_csv(self, campaign_dir: Path, rows: list) -> None:
+        """Write a two-column runs.csv (run_id, scan_id)."""
         campaign_dir.mkdir(parents=True, exist_ok=True)
         with open(campaign_dir / "runs.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "scan_id", "status"])
+            writer.writerow(["run_id", "scan_id"])
             for r in rows:
                 writer.writerow(r)
 
+    def _write_live_status(self, runs_root: Path, run_id: str, state: str) -> None:
+        """Write a minimal main/status.json so live status filtering works."""
+        import json
+        main_dir = runs_root / run_id / "main"
+        main_dir.mkdir(parents=True, exist_ok=True)
+        (main_dir / "status.json").write_text(json.dumps({"state": state}))
+
     def test_no_filter_returns_all(self, tmp_path):
         cd = tmp_path / "c1"
-        self._make_csv(cd, [["r1", "s1", "pending"], ["r2", "s1", "failed"]])
+        self._make_csv(cd, [["r1", "s1"], ["r2", "s1"]])
         ids = read_runs_by_filter(cd)
         assert ids == ["r1", "r2"]
 
     def test_scan_id_filter(self, tmp_path):
         cd = tmp_path / "c1"
-        self._make_csv(cd, [["r1", "s1", "pending"], ["r2", "s2", "pending"]])
+        self._make_csv(cd, [["r1", "s1"], ["r2", "s2"]])
         ids = read_runs_by_filter(cd, scan_id="s1")
         assert ids == ["r1"]
 
     def test_status_filter(self, tmp_path):
+        runs_root = tmp_path / "runs"
         cd = tmp_path / "c1"
-        self._make_csv(cd, [["r1", "", "pending"], ["r2", "", "failed"]])
-        ids = read_runs_by_filter(cd, status="failed")
+        self._make_csv(cd, [["r1", ""], ["r2", ""]])
+        self._write_live_status(runs_root, "r1", "pending")
+        self._write_live_status(runs_root, "r2", "failed")
+        ids = read_runs_by_filter(cd, status="failed", runs_root=runs_root)
         assert ids == ["r2"]
 
-    def test_combined_filter(self, tmp_path):
+    def test_status_filter_no_status_json_treated_as_pending(self, tmp_path):
+        runs_root = tmp_path / "runs"
         cd = tmp_path / "c1"
-        self._make_csv(cd, [
-            ["r1", "s1", "pending"],
-            ["r2", "s1", "failed"],
-            ["r3", "s2", "failed"],
-        ])
-        ids = read_runs_by_filter(cd, scan_id="s1", status="failed")
+        self._make_csv(cd, [["r1", ""], ["r2", ""]])
+        # r1 has no main/status.json — should be treated as "pending".
+        self._write_live_status(runs_root, "r2", "failed")
+        ids = read_runs_by_filter(cd, status="pending", runs_root=runs_root)
+        assert ids == ["r1"]
+
+    def test_combined_filter(self, tmp_path):
+        runs_root = tmp_path / "runs"
+        cd = tmp_path / "c1"
+        self._make_csv(cd, [["r1", "s1"], ["r2", "s1"], ["r3", "s2"]])
+        self._write_live_status(runs_root, "r1", "pending")
+        self._write_live_status(runs_root, "r2", "failed")
+        self._write_live_status(runs_root, "r3", "failed")
+        ids = read_runs_by_filter(cd, scan_id="s1", status="failed", runs_root=runs_root)
         assert ids == ["r2"]
 
     def test_missing_csv_returns_empty(self, tmp_path):
@@ -700,9 +721,9 @@ class TestDeleteRun:
         campaign_dir.mkdir(parents=True, exist_ok=True)
         with open(campaign_dir / "runs.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "scan_id", "status"])
+            writer.writerow(["run_id", "scan_id"])
             for rid in run_ids:
-                writer.writerow([rid, "", "pending"])
+                writer.writerow([rid, ""])
         return campaign_dir
 
     def test_deregisters_from_campaign_csv(self, tmp_path):
