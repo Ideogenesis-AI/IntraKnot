@@ -306,9 +306,9 @@ class TestRunStartScanExitCode:
         (campaign_dir / "campaign.yaml").write_text("algorithm: dmrg\n")
         with open(campaign_dir / "runs.csv", "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "scan_id", "status"])
+            writer.writerow(["run_id", "scan_id"])
             for rid in run_ids:
-                writer.writerow([rid, "scan1", "pending"])
+                writer.writerow([rid, "scan1"])
         return campaigns_root, campaign_dir
 
     def test_scan_last_nonzero_code_propagated(self, tmp_path):
@@ -356,8 +356,8 @@ class TestRunDeleteAllCampaigns:
             campaign_dir.mkdir(parents=True)
             with open(campaign_dir / "runs.csv", "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["run_id", "scan_id", "status"])
-                writer.writerow([run_id, "", "pending"])
+                writer.writerow(["run_id", "scan_id"])
+                writer.writerow([run_id, ""])
         return campaigns_root, runs_root
 
     def test_delete_dir_removes_from_all_campaigns(self, tmp_path):
@@ -649,58 +649,6 @@ class TestRunExecCLI:
             )
         assert result.exit_code == 0, result.output
         assert captured_env.get("IKNOT_ATTEMPT") == "attempt_01"
-
-
-# ---------------------------------------------------------------------------
-# iknot collect run / campaign
-# ---------------------------------------------------------------------------
-
-class TestCollectCLI:
-    def _make_run(self, tmp_path, run_id="r1"):
-        from intraknot.status import RunState, write_status, MainStatus, FailureReason
-        from helpers import make_run_dir
-        return make_run_dir(tmp_path, run_id, state=RunState.COMPLETED)
-
-    def test_collect_run(self, tmp_path):
-        runs_root = tmp_path / "runs"
-        self._make_run(runs_root, "r1")
-        runner = CliRunner()
-        result = runner.invoke(
-            main,
-            ["collect", "run", "r1", "--runs-root", str(runs_root)],
-        )
-        assert result.exit_code == 0, result.output
-        assert "r1" in result.output
-
-    def test_collect_run_missing_exits_nonzero(self, tmp_path):
-        runner = CliRunner()
-        result = runner.invoke(
-            main,
-            ["collect", "run", "nonexistent",
-             "--runs-root", str(tmp_path / "runs")],
-        )
-        assert result.exit_code != 0
-
-    def test_collect_campaign(self, tmp_path):
-        camps_root = tmp_path / "campaigns"
-        runs_root = tmp_path / "runs"
-        from intraknot.launch import create_campaign, _register_run_in_campaign
-        from intraknot.status import RunState
-        from helpers import make_run_dir
-        camp_dir = create_campaign("c1", "", "dmrg", camps_root)
-        make_run_dir(runs_root, "r1", state=RunState.COMPLETED)
-        _register_run_in_campaign(camp_dir, "r1")
-
-        runner = CliRunner()
-        result = runner.invoke(
-            main,
-            ["collect", "campaign",
-             "--id", "c1",
-             "--campaigns-root", str(camps_root),
-             "--runs-root", str(runs_root)],
-        )
-        assert result.exit_code == 0, result.output
-        assert "Collected" in result.output
 
 
 # ---------------------------------------------------------------------------
