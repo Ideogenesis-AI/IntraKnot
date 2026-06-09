@@ -198,7 +198,7 @@ max_bond     = 128
 n_sweeps     = 20
 e_tol        = 1.0e-8
 trunc_thresh = 1.0e-15
-init         = "product"
+init         = "product"   # "product", "random", "resume", or "ckpt"
 
 [output]
 save_state      = true
