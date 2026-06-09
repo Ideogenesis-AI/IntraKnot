@@ -103,6 +103,7 @@ runs/<RUN_ID>/
 ├── manifest.yaml           # run identity: id, uuid, algorithm, created timestamp
 ├── config.toml             # scientific configuration (merged from campaign defaults)
 ├── slurm.toml              # Slurm settings (copied from campaign's slurm.toml)
+├── initial.ckpt            # symlink → campaigns/<id>/initial.ckpt (only when init="ckpt")
 ├── algorithm/
 │   └── run_dmrg.py         # algorithm runner script (copied from campaign)
 ├── main/
@@ -113,6 +114,32 @@ runs/<RUN_ID>/
 ```
 
 **`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
+
+#### MPS initialisation strategies
+
+The `[algorithm]` section's `init` key controls how the initial MPS is constructed at the start of the first DMRG attempt:
+
+| Value | Description |
+|---|---|
+| `"random"` | Random MPS with `bond_dim = max_bond` (default). |
+| `"product"` | Deterministic product state (`bond_dim = 1`). Recommended for 2-site or CBE DMRG. |
+| `"resume"` | Loads `summary.state` from the most recent `dmrg.ckpt` in `main/attempts/`. Reduces the remaining sweep budget so the total sweep count is consistent. |
+| `"ckpt"` | Loads **only** the MPS state from a checkpoint file. No sweep count or convergence history is carried over — DMRG starts fresh from this state. |
+
+When `init = "ckpt"`, the checkpoint file is resolved as follows:
+
+1. If `init_ckpt` is set (an absolute or relative path), that file is used directly.
+2. Otherwise, the runner looks for `initial.ckpt` in the run root directory (same directory as `config.toml`).
+
+When `iknot run create` is called and `init = "ckpt"` is active without an explicit `init_ckpt`, a relative symlink `initial.ckpt → ../../campaigns/<id>/initial.ckpt` is automatically created in the run directory so that all runs in the campaign share a single initial state placed at the campaign root.
+
+```toml
+[algorithm]
+init         = "ckpt"
+
+# Optional: override the default initial.ckpt location.
+# init_ckpt  = "/path/to/some/other/run/state.ckpt"
+```
 
 **`slurm.toml`** is a copy of the campaign's `slurm.toml`. Edit it here for single-run Slurm overrides (e.g. a longer walltime for a larger bond dimension) without affecting other runs in the campaign.
 
