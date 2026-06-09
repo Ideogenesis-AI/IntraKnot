@@ -34,11 +34,11 @@ via `alice.init_mps`.
 
 MPS initialisation
 ------------------
-`alice.init_mps` is used for all fresh starts. The `[algorithm]` section
+`alice.init_mps` is used for fresh starts. The `[algorithm]` section
 controls the initial bond dimension and random seed:
 
     [algorithm]
-    init     = "random"   # "random" (default) or "product"
+    init     = "random"   # "random" (default), "product", "resume", or "ckpt"
     max_bond = 32         # bond dimension for init="random"; ignored for "product"
     seed     = 42         # random seed for init="random"
 
@@ -46,6 +46,12 @@ controls the initial bond dimension and random seed:
   product state; recommended as the starting point for 2-site or CBE DMRG.
 - `init = "random"` calls `init_mps(..., bond_dim=max_bond)` — a random MPS
   pre-populated with the correct symmetry structure.
+- `init = "ckpt"` loads the MPS state from a checkpoint file without
+  inheriting any other run metadata (sweep count, energies, etc.). The
+  checkpoint path is taken from `init_ckpt` if present; otherwise it
+  defaults to `initial.ckpt` in the run root directory. The checkpoint can
+  be any file loadable by `dmrg.Summary.load` (e.g. `state.ckpt` or
+  `dmrg.ckpt` from a prior run).
 
 DMRG checkpointing
 ------------------
@@ -278,16 +284,21 @@ def _init_mps(
     cfg_algo: Dict[str, Any],
     L: int,
     prior_checkpoint: Optional[Path],
+    run_dir: Path,
 ) -> Tuple[MPS, int]:
     """Initialise the MPS for a DMRG run.
 
-    Three strategies controlled by `cfg_algo["init"]`:
+    Four strategies controlled by `cfg_algo["init"]`:
 
     - `"product"` — deterministic product state via `init_mps(..., bond_dim=1)`.
       Bond dimension grows during DMRG. Best paired with 2-site or CBE DMRG.
     - `"random"` — random MPS via `init_mps(..., bond_dim=max_bond)`.
     - `"resume"` — load `summary.state` from `prior_checkpoint` and reduce
       the sweep budget by the number of sweeps already completed.
+    - `"ckpt"` — load **only** the MPS state from an explicit checkpoint file,
+      ignoring all other run metadata (sweep count, energies, convergence).
+      The checkpoint path is read from `cfg_algo["init_ckpt"]`; if absent,
+      defaults to `run_dir / "initial.ckpt"`.
 
     Falls back to `"random"` if `"resume"` is requested but no checkpoint
     exists.
@@ -303,16 +314,38 @@ def _init_mps(
         Chain length.
     prior_checkpoint:
         Path to `dmrg.ckpt` from a previous attempt, or `None`.
+    run_dir:
+        Root of the run directory; used to resolve the default `initial.ckpt`
+        path when `init = "ckpt"` and no explicit `init_ckpt` is configured.
 
     Returns
     -------
     mps, sweeps_done
         The initial MPS in right-canonical form (`center = 0`) and the
         number of DMRG sweeps already completed (non-zero only when resuming).
+
+    Raises
+    ------
+    FileNotFoundError
+        If `init = "ckpt"` and the resolved checkpoint file does not exist.
     """
     init_strategy = cfg_algo.get("init", "random")
     bond_dim = cfg_algo.get("max_bond", 32)
     seed = cfg_algo.get("seed", 42)
+
+    if init_strategy == "ckpt":
+        raw = cfg_algo.get("init_ckpt", None)
+        ckpt_path = Path(raw) if raw else (run_dir / "initial.ckpt")
+        if not ckpt_path.exists():
+            raise FileNotFoundError(
+                f"init=ckpt requested but checkpoint not found: {ckpt_path}"
+            )
+        logger.info("Loading initial MPS state from: %s", ckpt_path)
+        source = dmrg.Summary.load(ckpt_path)
+        mps = source.state
+        mps.canonical(0)
+        logger.info("  bond dims: %s", source.bond_dims)
+        return mps, 0
 
     if init_strategy == "resume":
         if prior_checkpoint is not None:
@@ -495,8 +528,8 @@ def run(run_dir: Path) -> None:
         L = geo.L
         logger.info("  chain length: %d", L)
 
-        # Initialise MPS (fresh or resumed from checkpoint).
-        mps, sweeps_done = _init_mps(cfg_model, cfg_algo, L, prior_checkpoint)
+        # Initialise MPS (fresh, resumed from checkpoint, or loaded from ckpt file).
+        mps, sweeps_done = _init_mps(cfg_model, cfg_algo, L, prior_checkpoint, run_dir)
 
         # Build DMRG options from the `[algorithm]` section. Override
         # checkpoint_dir so Alice writes its per-sweep dmrg.ckpt directly
