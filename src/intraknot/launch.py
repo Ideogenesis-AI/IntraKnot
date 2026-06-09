@@ -24,6 +24,7 @@ import csv
 import datetime
 import json
 import importlib.resources
+import os
 import shutil
 import subprocess
 import uuid as _uuid_lib
@@ -698,6 +699,20 @@ def create_run(
 
     # Write merged config.toml (source of truth for this run's science).
     (run_dir / "config.toml").write_text(_dump_toml(merged_cfg))
+
+    # When init="ckpt" is active and no explicit init_ckpt path is configured,
+    # the runner resolves "initial.ckpt" relative to the run root. Create a
+    # relative symlink pointing to the campaign's initial.ckpt so all runs in
+    # the campaign share a single checkpoint without duplicating the file.
+    algo_cfg = merged_cfg.get("algorithm", {})
+    if algo_cfg.get("init") == "ckpt" and "init_ckpt" not in algo_cfg:
+        campaign_ckpt = campaign_dir / "initial.ckpt"
+        run_ckpt = run_dir / "initial.ckpt"
+        rel_target = Path(os.path.relpath(campaign_ckpt, run_dir))
+        try:
+            run_ckpt.symlink_to(rel_target)
+        except (OSError, NotImplementedError):
+            pass
 
     # Copy slurm.toml from campaign (straight copy; user edits for per-run overrides).
     campaign_slurm = campaign_dir / "slurm.toml"
