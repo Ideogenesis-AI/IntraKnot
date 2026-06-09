@@ -644,6 +644,47 @@ class TestCreateRunExtended:
         assert len(matching) == 1
         assert matching[0]["scan_id"] == "chi_scan"
 
+    def test_create_run_init_ckpt_creates_symlink(self, tmp_path):
+        """create_run with init='ckpt' (no explicit init_ckpt) creates a relative symlink
+        run_dir/initial.ckpt -> campaign_dir/initial.ckpt."""
+        import os
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run_ckpt", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+            overrides={"algorithm": {"init": "ckpt"}},
+        )
+        run_ckpt = run_dir / "initial.ckpt"
+        assert run_ckpt.is_symlink(), "initial.ckpt symlink was not created"
+
+        # The symlink must resolve to campaigns/mycampaign/initial.ckpt.
+        target = Path(os.readlink(run_ckpt))
+        resolved = (run_dir / target).resolve()
+        expected = (campaigns_root / "mycampaign" / "initial.ckpt").resolve()
+        assert resolved == expected
+
+    def test_create_run_init_ckpt_explicit_path_no_symlink(self, tmp_path):
+        """When init_ckpt is explicitly set, create_run must NOT create initial.ckpt symlink."""
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run_ckpt_explicit", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+            overrides={"algorithm": {"init": "ckpt", "init_ckpt": "/some/explicit.ckpt"}},
+        )
+        run_ckpt = run_dir / "initial.ckpt"
+        # Neither the symlink nor a regular file should be present.
+        assert not run_ckpt.is_symlink()
+        assert not run_ckpt.exists()
+
+    def test_create_run_no_symlink_without_init_ckpt(self, tmp_path):
+        """create_run with init='random' (default) does not create initial.ckpt."""
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run_random", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        assert not (run_dir / "initial.ckpt").exists()
+
 
 # ---------------------------------------------------------------------------
 # read_runs_by_filter
