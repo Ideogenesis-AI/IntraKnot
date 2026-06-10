@@ -303,6 +303,12 @@ def _init_mps(
     Falls back to `"random"` if `"resume"` is requested but no checkpoint
     exists.
 
+    The optional `cfg_algo["target_qn"]` key sets the desired right-boundary
+    charge passed to `alice.init_mps` as `target_qn`. It is only used for
+    `"product"` and `"random"` strategies; `"ckpt"` and `"resume"` ignore it.
+    TOML arrays are converted to tuples to match Alice's convention for
+    product-group symmetries (e.g. `U1,U1` or `U1,SU2`).
+
     Parameters
     ----------
     cfg_model:
@@ -328,6 +334,9 @@ def _init_mps(
     ------
     FileNotFoundError
         If `init = "ckpt"` and the resolved checkpoint file does not exist.
+    ValueError
+        If `target_qn` is set and is not reachable for the given `L` and
+        physical space (propagated from `alice.init_mps`).
     """
     init_strategy = cfg_algo.get("init", "random")
     bond_dim = cfg_algo.get("max_bond", 32)
@@ -365,12 +374,23 @@ def _init_mps(
 
     Spc, Op = _load_space_from_cfg(cfg_model)
 
+    # Read target_qn; TOML arrays arrive as list — convert to tuple so that
+    # Alice receives the correct type for product-group symmetries.
+    raw_qn = cfg_algo.get("target_qn", None)
+    target_qn = tuple(raw_qn) if isinstance(raw_qn, list) else raw_qn
+
     if init_strategy == "product":
-        logger.info("Initialising product-state MPS (bond_dim=1)")
-        mps = init_mps(L, Spc, Op, bond_dim=1, seed=seed)
+        logger.info(
+            "Initialising product-state MPS (bond_dim=1, target_qn=%s)",
+            target_qn,
+        )
+        mps = init_mps(L, Spc, Op, bond_dim=1, target_qn=target_qn, seed=seed)
     else:
-        logger.info("Initialising random MPS: bond_dim=%d, seed=%d", bond_dim, seed)
-        mps = init_mps(L, Spc, Op, bond_dim=bond_dim, seed=seed)
+        logger.info(
+            "Initialising random MPS: bond_dim=%d, seed=%d, target_qn=%s",
+            bond_dim, seed, target_qn,
+        )
+        mps = init_mps(L, Spc, Op, bond_dim=bond_dim, target_qn=target_qn, seed=seed)
 
     return mps, 0
 
