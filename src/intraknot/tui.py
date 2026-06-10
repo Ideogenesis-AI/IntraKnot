@@ -57,7 +57,7 @@ import tomllib
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from rich.text import Text
 from textual import on
@@ -369,7 +369,71 @@ class CampaignModal(ModalScreen):
 
 
 # ---------------------------------------------------------------------------
-# Detail pane
+# View-file selector overlay
+# ---------------------------------------------------------------------------
+
+class ViewModal(ModalScreen):
+    """File viewer selector overlay.
+
+    Displays a list of viewable files for the selected run. Files that do not
+    exist on disk are shown dimmed with a `(not found)` suffix; selecting one
+    dismisses the modal with `None` so the caller can notify the user.
+    """
+
+    CSS = """
+    ViewModal {
+        align: center middle;
+    }
+    #view-box {
+        width: 52;
+        height: auto;
+        max-height: 24;
+        border: round $primary;
+        padding: 1 2;
+        background: $surface;
+    }
+    #view-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ListView {
+        height: auto;
+        max-height: 18;
+    }
+    """
+
+    def __init__(self, files: List[Tuple[str, Optional[Path]]]) -> None:
+        super().__init__()
+        # Each entry is (display label, resolved path or None if absent).
+        self._files = files
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="view-box"):
+            yield Label("View file", id="view-title")
+            items = []
+            for i, (label, path) in enumerate(self._files):
+                if path is not None:
+                    items.append(ListItem(Label(label), id=f"view-{i}"))
+                else:
+                    items.append(
+                        ListItem(
+                            Label(f"[dim]{label}  (not found)[/dim]"),
+                            id=f"view-{i}",
+                        )
+                    )
+            yield ListView(*items)
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        item_id = event.item.id or ""
+        if item_id.startswith("view-"):
+            idx = int(item_id[5:])
+            _, path = self._files[idx]
+            self.dismiss(path)
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.dismiss(None)
 # ---------------------------------------------------------------------------
 
 class RunDetail(Widget):
@@ -502,8 +566,11 @@ class DashboardApp(App):
     BINDINGS = [
         Binding("c", "campaign", "Campaign"),
         Binding("r", "refresh", "Refresh"),
-        Binding("l", "open_iknot_log", "iknot.log"),
-        Binding("a", "open_alice_log", "alice.log"),
+        Binding("v", "view_file", "View"),
+        # l and a remain as direct shortcuts but are hidden from the footer;
+        # the v overlay covers the same files and more.
+        Binding("l", "open_iknot_log", show=False),
+        Binding("a", "open_alice_log", show=False),
         # [ and ] are the clickable footer entries; key_display makes them
         # render as ← → so the UI stays intuitive.  The hidden priority
         # bindings on the actual arrow keys let users press ← → on the
@@ -711,9 +778,76 @@ class DashboardApp(App):
         with self.suspend():
             subprocess.run([self._editor, str(log_path)], check=False)
 
-    # -----------------------------------------------------------------------
-    # Events
-    # -----------------------------------------------------------------------
+    def action_view_file(self) -> None:
+        """Open the file viewer overlay for the selected run."""
+        run = self._selected_run()
+        if run is None:
+            self.notify("No run selected.", severity="warning")
+            return
+        self.push_screen(
+            ViewModal(self._build_view_file_list(run)), self._on_view_file_selected
+        )
+
+    def _build_view_file_list(self, run: RunRow) -> List[Tuple[str, Optional[Path]]]:
+        """Build the ordered list of (label, path) pairs for the view overlay.
+
+        A `None` path means the file does not currently exist on disk.
+        For Slurm output/error files (whose names embed the job ID), the most
+        recently modified match from `main/logs/` is used.
+
+        Parameters
+        ----------
+        run:
+            Currently selected run.
+
+        Returns
+        -------
+        List[Tuple[str, Optional[Path]]]
+            Display label paired with the resolved path (or `None`).
+        """
+        run_dir = self._runs_root / run.run_id
+        files: List[Tuple[str, Optional[Path]]] = []
+
+        # Algorithm logs from the current attempt directory.
+        files.append(("iknot.log", run.iknot_log_path))
+        files.append(("alice.log", run.alice_log_path))
+
+        # Main status file.
+        status_path = run_dir / "main" / "status.json"
+        files.append(("status.json", status_path if status_path.exists() else None))
+
+        # Slurm stdout and stderr — glob for the most recently modified file of
+        # each kind since the job ID is embedded in the filename at submit time.
+        logs_dir = run_dir / "main" / "logs"
+        for suffix in ("out", "err"):
+            if logs_dir.exists():
+                matches = sorted(
+                    logs_dir.glob(f"slurm-*.{suffix}"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            else:
+                matches = []
+            files.append((f"slurm .{suffix}", matches[0] if matches else None))
+
+        return files
+
+    def _on_view_file_selected(self, path: Optional[Path]) -> None:
+        """Open the file chosen in the view overlay, or notify if absent.
+
+        Parameters
+        ----------
+        path:
+            Resolved file path returned by `ViewModal`, or `None` when the
+            user cancelled or selected a file that does not exist.
+        """
+        if path is None:
+            return
+        if not path.exists():
+            self.notify(f"{path.name} not found.", severity="warning")
+            return
+        with self.suspend():
+            subprocess.run([self._editor, str(path)], check=False)
 
     @on(DataTable.RowHighlighted, "#run-table")
     def _on_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
