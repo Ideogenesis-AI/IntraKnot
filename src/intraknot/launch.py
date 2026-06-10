@@ -467,29 +467,6 @@ def _find_exec_script(
     )
 
 
-def update_current(run_dir: Path, attempt_name: str) -> None:
-    """Update `main/current` to point to `attempt_name`.
-
-    Tries a symlink first; falls back to `current.txt` on filesystems that do
-    not support symlinks.
-
-    Parameters
-    ----------
-    run_dir:
-        Root of the run directory.
-    attempt_name:
-        Bare attempt name, e.g. `"attempt_01"`.
-    """
-    current = run_dir / "main" / "current"
-    target = Path("attempts") / attempt_name
-    try:
-        if current.is_symlink() or current.exists():
-            current.unlink()
-        current.symlink_to(target)
-    except (OSError, NotImplementedError):
-        (run_dir / "main" / "current.txt").write_text(attempt_name + "\n")
-
-
 # ---------------------------------------------------------------------------
 # Campaign creation
 # ---------------------------------------------------------------------------
@@ -980,41 +957,6 @@ def delete_run(
         shutil.rmtree(run_dir)
 
     return removed
-
-
-# ---------------------------------------------------------------------------
-# Attempt creation
-# ---------------------------------------------------------------------------
-
-def create_attempt(run_dir: Path) -> Path:
-    """Create the next `attempt_NN` directory under `main/attempts/`.
-
-    The attempt index is one more than the highest existing index. Creates
-    the directory and updates `main/current`.
-
-    Parameters
-    ----------
-    run_dir:
-        Root of the run directory.
-
-    Returns
-    -------
-    Path
-        Absolute path to the newly created attempt directory.
-    """
-    attempts_root = run_dir / "main" / "attempts"
-    attempts_root.mkdir(parents=True, exist_ok=True)
-
-    existing = sorted(
-        d.name for d in attempts_root.iterdir()
-        if d.is_dir() and d.name.startswith("attempt_")
-    )
-    next_idx = int(existing[-1].split("_")[1]) + 1 if existing else 1
-    name = f"attempt_{next_idx:02d}"
-    attempt_dir = attempts_root / name
-    attempt_dir.mkdir()
-    update_current(run_dir, name)
-    return attempt_dir
 
 
 # ---------------------------------------------------------------------------

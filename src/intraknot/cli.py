@@ -64,7 +64,6 @@ from .config import (
 )
 from .discover import discover_cluster, load_discovery, save_discovery
 from .launch import (
-    create_attempt,
     create_campaign,
     create_run,
     delete_run,
