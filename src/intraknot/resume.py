@@ -25,8 +25,37 @@ from pathlib import Path
 from typing import List
 
 from .config import MachineConfig
-from .launch import create_attempt, submit_job, write_slurm_script
+from .launch import submit_job, write_slurm_script
 from .status import RETRYABLE_STATES, MainStatus, read_status
+
+
+def _next_attempt_path(run_dir: Path) -> Path:
+    """Return the path of the next attempt directory without creating it.
+
+    Computes the next attempt index so callers can display or log the
+    expected path before the job actually runs.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+
+    Returns
+    -------
+    Path
+        Predicted absolute path, e.g. ``.../main/attempts/attempt_02``.
+    """
+    attempts_root = run_dir / "main" / "attempts"
+    existing = (
+        sorted(
+            d.name for d in attempts_root.iterdir()
+            if d.is_dir() and d.name.startswith("attempt_")
+        )
+        if attempts_root.exists()
+        else []
+    )
+    next_idx = int(existing[-1].split("_")[1]) + 1 if existing else 1
+    return attempts_root / f"attempt_{next_idx:02d}"
 
 
 def is_resumable(run_dir: Path) -> bool:
@@ -80,7 +109,9 @@ def resume_run(
     Returns
     -------
     Path
-        Absolute path to the new attempt directory.
+        Predicted path to the attempt directory that the runner will create
+        (e.g. ``.../main/attempts/attempt_02``). The directory does not exist
+        yet at return time; it is created by the runner when the job starts.
 
     Raises
     ------
@@ -93,11 +124,16 @@ def resume_run(
             "Check main/status.json: state must be 'failed' and restartable must be true."
         )
 
-    attempt_dir = create_attempt(run_dir)
+    # Predict the next attempt path for display purposes only.
+    # Do NOT pre-create the directory here: the runner (run_dmrg.py) is
+    # responsible for creating the attempt directory when the job starts.
+    # Pre-creating it causes the runner to skip it and create one extra empty
+    # attempt directory.
+    next_attempt = _next_attempt_path(run_dir)
     write_slurm_script(run_dir, machine)
     if submit:
         submit_job(run_dir)
-    return attempt_dir
+    return next_attempt
 
 
 def resume_campaign(
