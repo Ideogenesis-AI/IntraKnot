@@ -500,6 +500,7 @@ def run(run_dir: Path) -> None:
             state=RunState.RUNNING,
             current_attempt=attempt_name,
             restartable=False,
+            nodename=socket.gethostname().split(".")[0],
             hostname=socket.gethostname(),
         ),
     )
@@ -602,6 +603,7 @@ def run(run_dir: Path) -> None:
             current_attempt=attempt_name,
             reason=end_reason,
             restartable=restartable,
+            nodename=socket.gethostname().split(".")[0],
             hostname=socket.gethostname(),
         ),
     )
