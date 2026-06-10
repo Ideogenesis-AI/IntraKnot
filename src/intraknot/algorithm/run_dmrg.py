@@ -286,7 +286,7 @@ def _init_mps(
     prior_checkpoint: Optional[Path],
     run_dir: Path,
 ) -> Tuple[MPS, int]:
-    """Initialise the MPS for a DMRG run.
+    """Initialize the MPS for a DMRG run.
 
     Four strategies controlled by `cfg_algo["init"]`:
 
@@ -313,7 +313,7 @@ def _init_mps(
     ----------
     cfg_model:
         Alice-compatible model config dict (`{"geometry": ..., "model": ...}`),
-        used to initialise the physical Hilbert space.
+        used to initialize the physical Hilbert space.
     cfg_algo:
         `config["algorithm"]` dict.
     L:
@@ -369,7 +369,7 @@ def _init_mps(
             return mps, prev.n_sweeps
         logger.warning(
             "init=resume requested but no prior checkpoint found; "
-            "falling back to random initialisation."
+            "falling back to random initialization."
         )
 
     Spc, Op = _load_space_from_cfg(cfg_model)
@@ -381,13 +381,13 @@ def _init_mps(
 
     if init_strategy == "product":
         logger.info(
-            "Initialising product-state MPS (bond_dim=1, target_qn=%s)",
+            "Initializing product-state MPS (bond_dim=1, target_qn=%s)",
             target_qn,
         )
         mps = init_mps(L, Spc, Op, bond_dim=1, target_qn=target_qn, seed=seed)
     else:
         logger.info(
-            "Initialising random MPS: bond_dim=%d, seed=%d, target_qn=%s",
+            "Initializing random MPS: bond_dim=%d, seed=%d, target_qn=%s",
             bond_dim, seed, target_qn,
         )
         mps = init_mps(L, Spc, Op, bond_dim=bond_dim, target_qn=target_qn, seed=seed)
@@ -505,6 +505,10 @@ def run(run_dir: Path) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
     logging.getLogger().addHandler(file_handler)
+    # The root logger's default level is WARNING, which silently drops INFO
+    # records from this runner before they reach any handler. Set the runner
+    # logger's level explicitly so its messages propagate to the root handlers.
+    logger.setLevel(logging.INFO)
 
     logger.info("IntraKnot DMRG runner")
     logger.info("  run_dir    : %s", run_dir)
@@ -547,7 +551,6 @@ def run(run_dir: Path) -> None:
         interactions, spc, geo = build_interaction(cfg_model)
         mpo = build_hamiltonian(interactions, geo.L, spc)
         L = geo.L
-        logger.info("  chain length: %d", L)
 
         # Initialise MPS (fresh, resumed from checkpoint, or loaded from ckpt file).
         mps, sweeps_done = _init_mps(cfg_model, cfg_algo, L, prior_checkpoint, run_dir)
@@ -569,6 +572,7 @@ def run(run_dir: Path) -> None:
             opts.n_sweeps = remaining
 
         # --- Run DMRG ---
+        logger.info("")
         summary = dmrg.run(mps, mpo, opts)
         # dmrg.ckpt is already written by Alice into attempt_dir after each sweep.
 
