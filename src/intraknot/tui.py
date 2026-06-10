@@ -152,6 +152,7 @@ class RunRow:
     reason: Optional[str] = None
     current_attempt: Optional[str] = None
     restartable: bool = False
+    nodename: Optional[str] = None
     converged: Optional[bool] = None
     n_sweeps: Optional[int] = None
     max_bond_dim: Optional[int] = None
@@ -226,6 +227,7 @@ def load_run_rows(
         reason = status_data.get("reason")
         current_attempt = status_data.get("current_attempt")
         restartable = bool(status_data.get("restartable", False))
+        nodename: Optional[str] = status_data.get("nodename")
 
         # Resolve current attempt directory once; reused for both observables
         # and the log path to avoid the overhead of a second filesystem traversal.
@@ -268,6 +270,7 @@ def load_run_rows(
             reason=reason,
             current_attempt=current_attempt,
             restartable=restartable,
+            nodename=nodename,
             converged=converged,
             n_sweeps=n_sweeps,
             max_bond_dim=max_bond_dim,
@@ -454,11 +457,12 @@ class RunDetail(Widget):
         reason_str = run.reason or "—"
         attempt_str = run.current_attempt or "—"
         restart_str = "yes" if run.restartable else "no"
+        node_str = run.nodename or "—"
 
         # Colored markup: labels are dim, state/reason values are colored.
         status_markup = (
             f"[dim]state:[/dim] [{color} bold]{icon} {effective_state}[/]"
-            f"  ·  [dim]reason:[/dim] [{color}]{reason_str}[/]"
+            f"  ·  [dim]node:[/dim] {node_str}"
             f"  ·  [dim]attempt:[/dim] [bold]{attempt_str}[/]"
             f"  ·  [dim]restartable:[/dim] {restart_str}"
         )
