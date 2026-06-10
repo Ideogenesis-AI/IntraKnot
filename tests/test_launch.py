@@ -426,6 +426,14 @@ class TestWriteSlurmScript:
         write_slurm_script(run_dir, _make_machine(), "run01")
         assert not (run_dir / "submit").exists()
 
+    def test_exports_yuzuha_cache_path(self, tmp_path):
+        run_dir = tmp_path / "run01"
+        (run_dir / "main" / "logs").mkdir(parents=True)
+        _write_slurm_toml(run_dir)
+        machine = MachineConfig(paths=PathsConfig(command="uv run", scratch_node="/scratch/$USER"))
+        text = write_slurm_script(run_dir, machine, "run01").read_text()
+        assert 'export YUZUHA_CACHE_PATH="/scratch/$USER/.yuzuha"' in text
+
 
 # ---------------------------------------------------------------------------
 # _find_exec_script
@@ -552,6 +560,14 @@ class TestWriteExecSlurmScript:
         text = write_exec_slurm_script(run_dir, "compute_sf", _make_machine()).read_text()
         assert "compute_sf.py" in text
         assert "--run-dir" in text
+
+    def test_exports_yuzuha_cache_path(self, tmp_path):
+        run_dir = tmp_path / "run01"
+        (run_dir / "exec" / "compute_sf" / "logs").mkdir(parents=True)
+        _write_slurm_toml(run_dir)
+        machine = MachineConfig(paths=PathsConfig(command="uv run", scratch_node="/scratch/$USER"))
+        text = write_exec_slurm_script(run_dir, "compute_sf", machine).read_text()
+        assert 'export YUZUHA_CACHE_PATH="/scratch/$USER/.yuzuha"' in text
 
 
 # ---------------------------------------------------------------------------
@@ -780,3 +796,12 @@ class TestWriteArraySlurmScript:
         # After the fix the awk expr is NR-1==id (row-based), not $1==id.
         assert "NR-1==id" in text
         assert "print $1" in text
+
+    def test_exports_yuzuha_cache_path(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        machine = MachineConfig(paths=PathsConfig(command="uv run", scratch_node="/scratch/$USER"))
+
+        text = write_array_slurm_script(camp_dir, runs_root, machine, "1-5").read_text()
+        assert 'export YUZUHA_CACHE_PATH="/scratch/$USER/.yuzuha"' in text
