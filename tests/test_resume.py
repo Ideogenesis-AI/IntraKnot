@@ -65,12 +65,13 @@ class TestResumeRun:
         with pytest.raises(ValueError, match="not resumable"):
             resume_run(run_dir, _make_machine(), submit=False)
 
-    def test_creates_attempt_without_submit(self, tmp_path):
+    def test_returns_predicted_attempt_path_without_submit(self, tmp_path):
         run_dir = _make_run_dir(tmp_path, "r1", RunState.FAILED, restartable=True)
         attempt = resume_run(run_dir, _make_machine(), submit=False)
-        assert attempt.is_dir()
-        # make_run_dir already created attempt_01, so the new attempt is _02.
-        assert attempt.name.startswith("attempt_")
+        # make_run_dir already created attempt_01, so the predicted next attempt is _02.
+        assert attempt.name == "attempt_02"
+        # The directory must NOT be pre-created; the runner creates it when the job starts.
+        assert not attempt.exists()
 
     def test_calls_sbatch_when_submit(self, tmp_path):
         run_dir = _make_run_dir(tmp_path, "r1", RunState.FAILED, restartable=True)
