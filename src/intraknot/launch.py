@@ -135,6 +135,7 @@ def _build_single_script(
     slurm: SlurmTomlConfig,
     python_cmd: str,
     run_id: str,
+    scratch_node: str = "/tmp/$USER",
 ) -> str:
     """Render the Slurm submit script for a single primary job.
 
@@ -148,6 +149,10 @@ def _build_single_script(
         Command used to invoke the runner (e.g. `"uv run"`).
     run_id:
         Run identifier used as the Slurm job name.
+    scratch_node:
+        Per-node local scratch directory (may contain shell variables such as
+        `$USER`).  The Yuzuha cache is placed under `.yuzuha/` inside this
+        directory.
 
     Returns
     -------
@@ -181,6 +186,7 @@ def _build_single_script(
         "set -euo pipefail\n"
         "\n"
         f'RUN_DIR="{run_dir}"\n'
+        f'export YUZUHA_CACHE_PATH="{scratch_node}/.yuzuha"\n'
         "\n"
         'echo "Starting DMRG run: $RUN_DIR"\n'
         'echo "SLURM_JOB_ID: $SLURM_JOB_ID"\n'
@@ -198,6 +204,7 @@ def _build_array_script(
     python_cmd: str,
     campaign_id: str,
     array_range: str,
+    scratch_node: str = "/tmp/$USER",
 ) -> str:
     """Render the Slurm array submit script for a campaign.
 
@@ -215,6 +222,10 @@ def _build_array_script(
         Campaign identifier used as the Slurm job name.
     array_range:
         Slurm array range string, e.g. `"1-10"` or `"1,3,5"`.
+    scratch_node:
+        Per-node local scratch directory (may contain shell variables such as
+        `$USER`).  The Yuzuha cache is placed under `.yuzuha/` inside this
+        directory.
 
     Returns
     -------
@@ -250,6 +261,7 @@ def _build_array_script(
         "\n"
         f'CAMPAIGN_DIR="{campaign_dir}"\n'
         f'RUNS_ROOT="{runs_root}"\n'
+        f'export YUZUHA_CACHE_PATH="{scratch_node}/.yuzuha"\n'
         "\n"
         "# Resolve run_id from runs.csv using SLURM_ARRAY_TASK_ID.\n"
         "# Row number minus the header row equals the 1-based array task index.\n"
@@ -279,6 +291,7 @@ def _build_exec_script(
     slurm: SlurmTomlConfig,
     python_cmd: str,
     run_id: str,
+    scratch_node: str = "/tmp/$USER",
 ) -> str:
     """Render the Slurm submit script for an exec (follow-up) job.
 
@@ -294,6 +307,10 @@ def _build_exec_script(
         Command used to invoke the runner.
     run_id:
         Run identifier used as the Slurm job name prefix.
+    scratch_node:
+        Per-node local scratch directory (may contain shell variables such as
+        `$USER`).  The Yuzuha cache is placed under `.yuzuha/` inside this
+        directory.
 
     Returns
     -------
@@ -328,6 +345,7 @@ def _build_exec_script(
         "set -euo pipefail\n"
         "\n"
         f'RUN_DIR="{run_dir}"\n'
+        f'export YUZUHA_CACHE_PATH="{scratch_node}/.yuzuha"\n'
         "\n"
         f'echo "Starting exec job: {script_name}"\n'
         'echo "Run dir: $RUN_DIR"\n'
@@ -996,7 +1014,7 @@ def write_slurm_script(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     slurm = load_slurm_toml(run_dir / "slurm.toml")
-    script = _build_single_script(run_dir, slurm, machine.paths.command, run_id)
+    script = _build_single_script(run_dir, slurm, machine.paths.command, run_id, machine.paths.scratch_node)
 
     out = run_dir / "main" / "submit.slurm"
     out.write_text(script)
@@ -1040,7 +1058,8 @@ def write_array_slurm_script(
 
     slurm = load_slurm_toml(campaign_dir / "slurm.toml")
     script = _build_array_script(
-        campaign_dir, runs_root, slurm, machine.paths.command, campaign_id, array_range
+        campaign_dir, runs_root, slurm, machine.paths.command, campaign_id, array_range,
+        machine.paths.scratch_node,
     )
 
     out = campaign_dir / "submit_array.slurm"
@@ -1157,7 +1176,7 @@ def write_exec_slurm_script(
     run_id = run_dir.name
 
     slurm = load_slurm_toml(run_dir / "slurm.toml")
-    script = _build_exec_script(run_dir, script_name, slurm, machine.paths.command, run_id)
+    script = _build_exec_script(run_dir, script_name, slurm, machine.paths.command, run_id, machine.paths.scratch_node)
 
     out = run_dir / "exec" / script_name / "submit.slurm"
     out.parent.mkdir(parents=True, exist_ok=True)
