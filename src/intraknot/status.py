@@ -151,15 +151,19 @@ class MainStatus:
         Reason code from the latest attempt; `None` while pending or running.
     restartable:
         Whether `retry` may create a new attempt.
+    nodename:
+        Short node name (FQDN with domain suffix stripped) of the node where
+        the most recent attempt ran; `None` until the runner starts.
     hostname:
-        Hostname of the node where the most recent attempt ran; `None` until
-        the runner starts.
+        Full hostname of the node where the most recent attempt ran; `None`
+        until the runner starts.
     """
 
     state: RunState
     current_attempt: Optional[str] = None
     reason: Optional[FailureReason] = None
     restartable: bool = False
+    nodename: Optional[str] = None
     hostname: Optional[str] = None
 
     def to_dict(self) -> dict:
@@ -178,6 +182,7 @@ class MainStatus:
             current_attempt=d.get("current_attempt"),
             reason=FailureReason(d["reason"]) if d.get("reason") else None,
             restartable=d.get("restartable", False),
+            nodename=d.get("nodename"),
             hostname=d.get("hostname"),
         )
 
