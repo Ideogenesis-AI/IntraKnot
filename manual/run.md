@@ -126,6 +126,34 @@ The `[algorithm]` section's `init` key controls how the initial MPS is construct
 | `"resume"` | Loads `summary.state` from the most recent `dmrg.ckpt` in `main/attempts/`. Reduces the remaining sweep budget so the total sweep count is consistent. |
 | `"ckpt"` | Loads **only** the MPS state from a checkpoint file. No sweep count or convergence history is carried over — DMRG starts fresh from this state. |
 
+##### `target_qn` — right-boundary quantum number
+
+For `init = "product"` and `init = "random"`, the optional `target_qn` key pins the right-boundary charge of the initial MPS to a specific quantum number sector. Alice's `init_mps` will raise a `ValueError` if the requested sector is unreachable for the given chain length and physical space.
+
+When `target_qn` is omitted, Alice defaults to the vacuum charge (total charge zero), which is correct for even-length chains at half-filling / zero magnetization. For **odd-length chains** (e.g. a 3×3 Kagome lattice with L = 27 sites), the zero-charge sector does not exist and `target_qn` must be set explicitly.
+
+```toml
+[algorithm]
+init       = "random"
+
+# Spin-½ U1 — odd L, target Sz = −½  (Alice charge convention: 2Sz = −1)
+target_qn  = -1
+
+# Band U1,U1 — odd L, target N=13 electrons, Sz = 0
+# target_qn = [-1, 0]
+```
+
+The value must match Alice's internal charge convention for the active symmetry group:
+
+| Symmetry | Type | Meaning |
+|---|---|---|
+| `U1` (Spin, Ferm) | integer | `2 × Sz` or `2N − L` |
+| `SU2` | integer | total spin `S` in units of ½ |
+| `U1,U1` / `Z2,U1` | array of 2 integers | `[charge, spin]` components |
+| `U1,SU2` / `Z2,SU2` | array of 2 integers | `[charge, S_in_half_units]` |
+
+`target_qn` is ignored for `init = "ckpt"` and `init = "resume"`.
+
 When `init = "ckpt"`, the checkpoint file is resolved as follows:
 
 1. If `init_ckpt` is set (an absolute or relative path), that file is used directly.
