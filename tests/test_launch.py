@@ -32,14 +32,12 @@ from intraknot.launch import (
     _find_exec_script,
     _register_run_in_campaign,
     _render_slurm_header,
-    create_attempt,
     create_campaign,
     create_run,
     delete_run,
     prepare_exec,
     read_runs_by_filter,
     remove_run_from_all_campaigns,
-    update_current,
     write_array_slurm_script,
     write_exec_slurm_script,
     write_slurm_script,
@@ -344,46 +342,6 @@ class TestRemoveRunFromAllCampaigns:
     def test_returns_empty_when_campaigns_root_absent(self, tmp_path):
         removed = remove_run_from_all_campaigns(tmp_path / "nonexistent", "run_a")
         assert removed == []
-
-
-# ---------------------------------------------------------------------------
-# create_attempt
-# ---------------------------------------------------------------------------
-
-class TestCreateAttempt:
-    def test_creates_first_attempt(self, tmp_path):
-        run_dir = tmp_path / "run01"
-        (run_dir / "main" / "attempts").mkdir(parents=True)
-        attempt_dir = create_attempt(run_dir)
-        assert attempt_dir.name == "attempt_01"
-        assert attempt_dir.is_dir()
-
-    def test_increments_index(self, tmp_path):
-        run_dir = tmp_path / "run01"
-        (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
-        attempt_dir = create_attempt(run_dir)
-        assert attempt_dir.name == "attempt_02"
-
-    def test_updates_current(self, tmp_path):
-        run_dir = tmp_path / "run01"
-        (run_dir / "main" / "attempts").mkdir(parents=True)
-        create_attempt(run_dir)
-        current = run_dir / "main" / "current"
-        txt = run_dir / "main" / "current.txt"
-        assert current.is_symlink() or txt.exists()
-
-
-# ---------------------------------------------------------------------------
-# update_current
-# ---------------------------------------------------------------------------
-
-class TestUpdateCurrent:
-    def test_creates_symlink(self, tmp_path):
-        run_dir = tmp_path / "run01"
-        (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
-        update_current(run_dir, "attempt_01")
-        current = run_dir / "main" / "current"
-        assert current.is_symlink() or (run_dir / "main" / "current.txt").exists()
 
 
 # ---------------------------------------------------------------------------
