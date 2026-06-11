@@ -27,6 +27,7 @@ import pytest
 from intraknot.config import MachineConfig, PathsConfig
 import yaml
 
+from intraknot.alg_lock import AlgorithmLock
 from intraknot.launch import (
     _dump_toml,
     _find_exec_script,
@@ -805,3 +806,109 @@ class TestWriteArraySlurmScript:
 
         text = write_array_slurm_script(camp_dir, runs_root, machine, "1-5").read_text()
         assert 'export YUZUHA_CACHE_PATH="/scratch/$USER/.yuzuha"' in text
+
+
+# ---------------------------------------------------------------------------
+# create_campaign — algorithm.lock creation
+# ---------------------------------------------------------------------------
+
+class TestCreateCampaignAlgorithmLock:
+    def test_creates_algorithm_lock(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock_path = camp_dir / "algorithm" / "algorithm.lock"
+        assert lock_path.exists(), "algorithm.lock should be created by create_campaign"
+
+    def test_lock_has_managed_entry_for_runner(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock = AlgorithmLock.load(camp_dir / "algorithm" / "algorithm.lock")
+        assert lock.is_managed("run_dmrg.py"), (
+            "run_dmrg.py should be a managed entry in algorithm.lock"
+        )
+
+    def test_lock_entry_has_intraknot_source(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock = AlgorithmLock.load(camp_dir / "algorithm" / "algorithm.lock")
+        entry = lock.managed["run_dmrg.py"]
+        assert entry.source.startswith("intraknot:"), (
+            "Managed entry source should start with 'intraknot:'"
+        )
+
+    def test_lock_entry_sha256_matches_file(self, tmp_path):
+        from intraknot.alg_lock import _sha256_path
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock = AlgorithmLock.load(camp_dir / "algorithm" / "algorithm.lock")
+        on_disk_sha = _sha256_path(camp_dir / "algorithm" / "run_dmrg.py")
+        assert lock.managed["run_dmrg.py"].sha256 == on_disk_sha
+
+    def test_lock_has_no_custom_entries_initially(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock = AlgorithmLock.load(camp_dir / "algorithm" / "algorithm.lock")
+        assert lock.custom == []
+
+
+# ---------------------------------------------------------------------------
+# create_run — algorithm/ directory snapshot
+# ---------------------------------------------------------------------------
+
+class TestCreateRunAlgorithmSnapshot:
+    def _setup(self, tmp_path: Path):
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        create_campaign("mycampaign", "", "dmrg", campaigns_root)
+        return campaigns_root, runs_root
+
+    def test_run_algorithm_dir_contains_lock(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        assert (run_dir / "algorithm" / "algorithm.lock").exists(), (
+            "algorithm.lock must be copied into the run's algorithm/ snapshot"
+        )
+
+    def test_run_algorithm_dir_contains_runner_script(self, tmp_path):
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        assert (run_dir / "algorithm" / "run_dmrg.py").exists()
+
+    def test_extra_campaign_script_is_snapshotted(self, tmp_path):
+        """Additional scripts placed in campaign algorithm/ are included in run snapshots."""
+        campaigns_root, runs_root = self._setup(tmp_path)
+        extra = campaigns_root / "mycampaign" / "algorithm" / "my_obs.py"
+        extra.write_text("# custom observable\n")
+
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        assert (run_dir / "algorithm" / "my_obs.py").exists(), (
+            "Extra campaign scripts should be included in the run snapshot"
+        )
+
+    def test_run_lock_is_independent_of_campaign_lock(self, tmp_path):
+        """Modifying the campaign lock after run creation must not affect the run."""
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run01", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        # Overwrite the campaign's lock file.
+        camp_lock = campaigns_root / "mycampaign" / "algorithm" / "algorithm.lock"
+        camp_lock.write_text("# replaced\n")
+        # The run's lock must still be the original.
+        run_lock = run_dir / "algorithm" / "algorithm.lock"
+        assert run_lock.read_text() != "# replaced\n"
