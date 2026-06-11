@@ -10,7 +10,7 @@ The aggregated manifest for all registered databases is stored in `configs/regis
 
 ```bash
 # 1. Register the community database.
-iknot database add intraknot-database https://github.com/Ideogenesis-AI/intraknot-database
+iknot database add intraknot-database https://github.com/Ideogenesis-AI/IntraKnot-Database
 
 # 2. Browse available scripts.
 iknot database list
@@ -35,7 +35,7 @@ iknot database add [OPTIONS] NAME URL
 ```
 
 `NAME` is the short identifier used in source descriptors (e.g. `"intraknot-database"`).
-`URL` is the GitHub repository URL (e.g. `https://github.com/Ideogenesis-AI/intraknot-database`).
+`URL` is the GitHub repository URL (e.g. `https://github.com/Ideogenesis-AI/IntraKnot-Database`).
 
 The remote `registry.yaml` is fetched immediately. If the repository does not yet exist the command fails with a clear error message. The database is not registered until a successful fetch.
 
@@ -98,7 +98,7 @@ iknot database list [OPTIONS]
 
 ```
 intraknot-database
-  URL         : https://github.com/Ideogenesis-AI/intraknot-database
+  URL         : https://github.com/Ideogenesis-AI/IntraKnot-Database
   Last fetched: 2026-06-11
   Description : Community algorithm scripts for IntraKnot
   observables (3 scripts)
