@@ -113,7 +113,7 @@ runs/<RUN_ID>/
 └── summary/                # optional; may contain observables snapshots
 ```
 
-**`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
+**`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`, `[plugin]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
 
 #### MPS initialisation strategies
 
@@ -168,6 +168,27 @@ init         = "ckpt"
 # Optional: override the default initial.ckpt location.
 # init_ckpt  = "/path/to/some/other/run/state.ckpt"
 ```
+
+#### Custom physics via `[plugin]`
+
+The `[plugin]` section lets you replace any of Alice's four built-in pipeline stages with a callable loaded from an external Python file. This is Alice's extension mechanism for non-standard lattice geometries, interaction maps, physical spaces, or Hamiltonians.
+
+| Key | Stage replaced | Callable signature |
+|---|---|---|
+| `geometry` | Geometry constructor | `(geo_cfg: dict) -> Geometry` |
+| `intrcmap` | Interaction-map builder | `(geo: Geometry) -> List[Interaction]` |
+| `space` | Physical-space (operator-set) factory | `(model_cfg: dict) -> Tuple[Index, dict]` |
+| `model` | Model (coupling + tensor) builder | `(interactions, geo, model_cfg) -> None` |
+
+Each value is a `"path/to/file.py:function_name"` plugin spec. Relative paths are resolved against the run's `algorithm/` directory.
+
+```toml
+[plugin]
+# Replace only the model stage; all other stages use Alice's built-ins.
+model = "algorithm/my_hubbard.py:build_model"
+```
+
+All four keys are optional and independent: specify only the stages you want to override. Entries in `[plugin]` take precedence over Alice's built-in dispatch tables but are overridden by any callable passed directly to `build_interaction` at the Python API level.
 
 **`slurm.toml`** is a copy of the campaign's `slurm.toml`. Edit it here for single-run Slurm overrides (e.g. a longer walltime for a larger bond dimension) without affecting other runs in the campaign.
 
