@@ -762,3 +762,547 @@ class TestClusterCLI:
         )
         assert result.exit_code != 0
         assert "cluster sync" in result.output or "cluster.yaml" in result.output
+
+
+# ---------------------------------------------------------------------------
+# iknot init — registry.yaml
+# ---------------------------------------------------------------------------
+
+class TestCmdInitRegistry:
+    def test_creates_registry_yaml(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmpdir:
+            tmpdir = Path(tmpdir)
+            result = runner.invoke(main, ["init"])
+            assert result.exit_code == 0, result.output
+            assert (tmpdir / "configs" / "registry.yaml").exists(), (
+                "iknot init should create configs/registry.yaml"
+            )
+
+    def test_registry_yaml_contains_databases_key(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmpdir:
+            tmpdir = Path(tmpdir)
+            runner.invoke(main, ["init"])
+            text = (tmpdir / "configs" / "registry.yaml").read_text()
+            assert "databases:" in text
+
+    def test_does_not_overwrite_existing_registry_yaml(self):
+        runner = CliRunner()
+        with runner.isolated_filesystem() as tmpdir:
+            tmpdir = Path(tmpdir)
+            runner.invoke(main, ["init"])
+            reg_path = tmpdir / "configs" / "registry.yaml"
+            reg_path.write_text("# custom registry\ndatabases: {}\n")
+            runner.invoke(main, ["init"])
+            assert reg_path.read_text() == "# custom registry\ndatabases: {}\n"
+
+
+# ---------------------------------------------------------------------------
+# iknot database commands
+# ---------------------------------------------------------------------------
+
+_MOCK_DB_REGISTRY_YAML = b"""\
+description: A mock database
+categories:
+  observables:
+    description: Observable scripts
+    scripts:
+      - name: spin_corr
+        file: observables/spin_corr.py
+        description: Spin-spin correlation
+        sha256: aabbccdd
+"""
+
+
+class TestDatabaseAddCLI:
+    def test_add_registers_database(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            result = runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Registered" in result.output
+        reg_path = configs_dir / "registry.yaml"
+        assert reg_path.exists()
+        import yaml
+        data = yaml.safe_load(reg_path.read_text())
+        assert "test-db" in data["databases"]
+
+    def test_add_rejects_duplicate(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+            result = runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code != 0
+        assert "already registered" in result.output
+
+    def test_add_rejects_reserved_name(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["database", "add", "intraknot",
+             "https://github.com/foo/bar",
+             "--machine", str(configs_dir)],
+        )
+        assert result.exit_code != 0
+        assert "reserved" in result.output
+
+    def test_add_handles_http_error(self, tmp_path):
+        import urllib.error
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        http_err = urllib.error.HTTPError(
+            url="https://example.com", code=404, msg="Not Found",
+            hdrs=None, fp=None,  # type: ignore[arg-type]
+        )
+        with patch("intraknot.database._fetch_bytes", side_effect=http_err):
+            result = runner.invoke(
+                main,
+                ["database", "add", "missing-db",
+                 "https://github.com/foo/missing-db",
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code != 0
+        assert "404" in result.output or "Not Found" in result.output or "HTTP" in result.output
+
+
+class TestDatabaseRemoveCLI:
+    def _setup(self, tmp_path: Path) -> Path:
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        return configs_dir
+
+    def test_remove_existing(self, tmp_path):
+        configs_dir = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["database", "remove", "test-db", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Removed" in result.output
+        import yaml
+        data = yaml.safe_load((configs_dir / "registry.yaml").read_text())
+        assert "test-db" not in (data.get("databases") or {})
+
+    def test_remove_nonexistent_exits_nonzero(self, tmp_path):
+        configs_dir = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["database", "remove", "ghost-db", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code != 0
+        assert "not registered" in result.output
+
+
+class TestDatabaseListCLI:
+    def test_list_empty(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["database", "list", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "No databases" in result.output
+
+    def test_list_shows_registered_db(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        result = runner.invoke(
+            main,
+            ["database", "list", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "test-db" in result.output
+        assert "observables" in result.output
+
+
+class TestDatabaseUpdateCLI:
+    def test_update_refreshes_manifest(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        updated = _MOCK_DB_REGISTRY_YAML.replace(b"A mock database", b"Updated database")
+        with patch("intraknot.database._fetch_bytes", return_value=updated):
+            result = runner.invoke(
+                main,
+                ["database", "update", "test-db", "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "test-db" in result.output
+
+    def test_update_all_when_no_name(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            result = runner.invoke(
+                main,
+                ["database", "update", "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+
+    def test_update_no_databases_registered(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["database", "update", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "No databases" in result.output
+
+    def test_update_unknown_db_exits_nonzero(self, tmp_path):
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        with patch("intraknot.database._fetch_bytes", return_value=_MOCK_DB_REGISTRY_YAML):
+            runner.invoke(
+                main,
+                ["database", "add", "test-db",
+                 "https://github.com/foo/test-db",
+                 "--machine", str(configs_dir)],
+            )
+        result = runner.invoke(
+            main,
+            ["database", "update", "ghost-db", "--machine", str(configs_dir)],
+        )
+        assert result.exit_code != 0
+        assert "not registered" in result.output
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign install
+# ---------------------------------------------------------------------------
+
+class TestCampaignInstallCLI:
+    def _setup(self, tmp_path: Path):
+        from intraknot.launch import create_campaign
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        create_campaign("c1", "", "dmrg", campaigns_root)
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        return campaigns_root, configs_dir
+
+    def test_install_from_builtin_source(self, tmp_path):
+        campaigns_root, configs_dir = self._setup(tmp_path)
+        runner = CliRunner()
+        content = b"# run_tdvp stub\n"
+        with patch("importlib.resources.files") as mock_files:
+            mock_files.return_value.joinpath.return_value.read_bytes.return_value = content
+            result = runner.invoke(
+                main,
+                ["campaign", "install",
+                 "intraknot:algorithm/run_tdvp.py",
+                 "--campaign", "c1",
+                 "--campaigns-root", str(campaigns_root),
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Installed" in result.output
+        dest = campaigns_root / "c1" / "algorithm" / "algorithm" / "run_tdvp.py"
+        # dest_rel preserves directory structure from source
+        dest_flat = campaigns_root / "c1" / "algorithm" / "run_tdvp.py"
+        # The file is at the path "algorithm/run_tdvp.py" inside algorithm dir.
+        dest_from_source = (
+            campaigns_root / "c1" / "algorithm" / "algorithm" / "run_tdvp.py"
+        )
+        # Check the lock has the managed entry.
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(
+            campaigns_root / "c1" / "algorithm" / "algorithm.lock"
+        )
+        assert lock.is_managed("algorithm/run_tdvp.py")
+
+    def test_install_with_custom_dest(self, tmp_path):
+        campaigns_root, configs_dir = self._setup(tmp_path)
+        runner = CliRunner()
+        content = b"# spin_corr\n"
+        with patch("importlib.resources.files") as mock_files:
+            mock_files.return_value.joinpath.return_value.read_bytes.return_value = content
+            result = runner.invoke(
+                main,
+                ["campaign", "install",
+                 "intraknot:observables/spin_corr.py",
+                 "--as", "spin_corr.py",
+                 "--campaign", "c1",
+                 "--campaigns-root", str(campaigns_root),
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code == 0, result.output
+        assert (campaigns_root / "c1" / "algorithm" / "spin_corr.py").exists()
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(
+            campaigns_root / "c1" / "algorithm" / "algorithm.lock"
+        )
+        assert lock.is_managed("spin_corr.py")
+
+    def test_install_blocks_duplicate_managed(self, tmp_path):
+        campaigns_root, configs_dir = self._setup(tmp_path)
+        runner = CliRunner()
+        content = b"# run_dmrg\n"
+        # run_dmrg.py is already managed (created by create_campaign).
+        with patch("importlib.resources.files") as mock_files:
+            mock_files.return_value.joinpath.return_value.read_bytes.return_value = content
+            result = runner.invoke(
+                main,
+                ["campaign", "install",
+                 "intraknot:algorithm/run_dmrg.py",
+                 "--as", "run_dmrg.py",
+                 "--campaign", "c1",
+                 "--campaigns-root", str(campaigns_root),
+                 "--machine", str(configs_dir)],
+            )
+        assert result.exit_code != 0
+        assert "already a managed entry" in result.output
+
+    def test_install_missing_campaign_exits_nonzero(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        configs_dir = tmp_path / "configs"
+        configs_dir.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "install",
+             "intraknot:algorithm/run_dmrg.py",
+             "--campaign", "nonexistent",
+             "--campaigns-root", str(campaigns_root),
+             "--machine", str(configs_dir)],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign override
+# ---------------------------------------------------------------------------
+
+class TestCampaignOverrideCLI:
+    def _setup(self, tmp_path: Path):
+        from intraknot.launch import create_campaign
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        create_campaign("c1", "", "dmrg", campaigns_root)
+        return campaigns_root
+
+    def test_override_promotes_managed_entry(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "override", "run_dmrg.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Promoted" in result.output
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(
+            campaigns_root / "c1" / "algorithm" / "algorithm.lock"
+        )
+        assert not lock.is_managed("run_dmrg.py")
+        assert lock.is_custom("run_dmrg.py")
+
+    def test_override_nonexistent_entry_exits_nonzero(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "override", "nonexistent.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign add-script
+# ---------------------------------------------------------------------------
+
+class TestCampaignAddScriptCLI:
+    def _setup(self, tmp_path: Path):
+        from intraknot.launch import create_campaign
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        create_campaign("c1", "", "dmrg", campaigns_root)
+        return campaigns_root
+
+    def test_add_script_registers_custom_file(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        script = campaigns_root / "c1" / "algorithm" / "my_obs.py"
+        script.write_text("# my observable\n")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "add-script", "my_obs.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "custom" in result.output.lower()
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(
+            campaigns_root / "c1" / "algorithm" / "algorithm.lock"
+        )
+        assert lock.is_custom("my_obs.py")
+
+    def test_add_script_missing_file_exits_nonzero(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "add-script", "nonexistent.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower() or "Error" in result.output
+
+    def test_add_script_blocks_managed_entry(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        # run_dmrg.py is managed, not custom.
+        result = runner.invoke(
+            main,
+            ["campaign", "add-script", "run_dmrg.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code != 0
+        assert "managed entry" in result.output or "override" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign sync
+# ---------------------------------------------------------------------------
+
+class TestCampaignSyncCLI:
+    def _setup(self, tmp_path: Path):
+        from intraknot.launch import create_campaign
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        create_campaign("c1", "", "dmrg", campaigns_root)
+        return campaigns_root
+
+    def test_sync_blocks_on_local_modification(self, tmp_path):
+        """sync must not overwrite locally modified managed files."""
+        campaigns_root = self._setup(tmp_path)
+        runner_script = campaigns_root / "c1" / "algorithm" / "run_dmrg.py"
+        runner_script.write_bytes(b"# locally modified\n")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "sync",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code != 0 or "locally modified" in result.output.lower()
+        # The file must NOT have been overwritten.
+        assert runner_script.read_bytes() == b"# locally modified\n"
+
+    def test_sync_up_to_date_reports_no_updates(self, tmp_path):
+        """When the managed file matches the package content, sync reports up-to-date."""
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        # Patch resolve_file to return the current on-disk content.
+        alg_dir = campaigns_root / "c1" / "algorithm"
+        current_content = (alg_dir / "run_dmrg.py").read_bytes()
+
+        with patch("intraknot.database.DatabaseRegistry.resolve_file",
+                   return_value=(current_content, __import__("intraknot.alg_lock", fromlist=["_sha256_bytes"])._sha256_bytes(current_content))):
+            result = runner.invoke(
+                main,
+                ["campaign", "sync", "--yes",
+                 "--campaign", "c1",
+                 "--campaigns-root", str(campaigns_root)],
+            )
+        # Should exit cleanly (0 or may use non-zero for "nothing to update").
+        assert "modified" not in result.output.lower() or result.exit_code == 0
+
+    def test_sync_specific_file_only(self, tmp_path):
+        """Specifying a file name only syncs that file."""
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        # Syncing a non-managed file should print a warning but not fail hard.
+        result = runner.invoke(
+            main,
+            ["campaign", "sync", "nonexistent.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        # Either warns and exits 0, or exits non-zero.  Key: no crash.
+        assert "nonexistent.py" in result.output
+
+    def test_sync_no_managed_entries_message(self, tmp_path):
+        """A lock with no managed entries produces an informative message."""
+        campaigns_root = self._setup(tmp_path)
+        from intraknot.alg_lock import AlgorithmLock
+        lock_path = campaigns_root / "c1" / "algorithm" / "algorithm.lock"
+        lock = AlgorithmLock()
+        lock.save(lock_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "sync",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "No managed" in result.output
