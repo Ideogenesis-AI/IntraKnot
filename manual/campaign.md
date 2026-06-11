@@ -58,6 +58,7 @@ campaigns/<CAMPAIGN_ID>/
 ├── notes.md            # free-form notes
 ├── logs/               # Slurm array job log files
 └── algorithm/
+    ├── algorithm.lock  # provenance tracking for all scripts in this directory
     └── run_dmrg.py     # algorithm runner script (or the one named by --algorithm)
 ```
 
@@ -107,6 +108,148 @@ If you also set the environment variable, clear it manually:
 ```bash
 unset INTRAKNOT_CAMPAIGN
 ```
+
+---
+
+### `iknot campaign install <SOURCE>`
+
+Fetch a script from a registered algorithm database and add it to the campaign's `algorithm/` directory as a managed entry.
+
+#### Synopsis
+
+```
+iknot campaign install [OPTIONS] SOURCE
+```
+
+`SOURCE` is a source descriptor of the form `<db-name>:<path>`, e.g.:
+
+```
+intraknot-database:observables/spin_corr.py
+```
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--as FILENAME` | (same as source path) | Destination filename inside `algorithm/`. Relative subdirectory structure from the source path is preserved by default. |
+| `--campaign TEXT` | active campaign | Campaign to install into. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+| `--machine PATH` | `./configs` | Path to the `configs/` directory (for `registry.yaml`). |
+
+#### What it does
+
+1. Resolves `SOURCE` — either via `importlib.resources` for `intraknot:` sources or via an HTTP fetch for registered database sources.
+2. Writes the file to `algorithm/<dest>`, creating subdirectories as needed.
+3. Records the file as a **managed entry** in `algorithm.lock` with its SHA-256 digest and source descriptor.
+
+Once installed, `iknot campaign sync` will track the file and notify you of upstream changes.
+
+---
+
+### `iknot campaign sync [FILE ...]`
+
+Synchronise managed algorithm scripts from their sources.
+
+#### Synopsis
+
+```
+iknot campaign sync [OPTIONS] [FILE ...]
+```
+
+Without `FILE` arguments, all managed entries are checked. When one or more `FILE` arguments are given, only those entries are processed.
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--force` | off | Overwrite locally modified files instead of blocking. |
+| `--yes`, `-y` | off | Accept all updates without prompting. |
+| `--campaign TEXT` | active campaign | Campaign to sync. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+| `--machine PATH` | `./configs` | Path to the `configs/` directory (for `registry.yaml`). |
+
+#### Conflict policy
+
+For each target file:
+
+1. If the on-disk SHA-256 differs from the lock record, the file is **locally modified**. Without `--force`, sync is blocked for that file with a message explaining how to proceed (promote with `iknot campaign override`, or discard local changes with `--force`).
+2. If the file is unmodified, the upstream SHA-256 is checked against the cached registry manifest. When it differs, the updated file is downloaded and you are prompted to confirm (skipped with `--yes`).
+
+Files not listed in `algorithm.lock` are never touched.
+
+---
+
+### `iknot campaign override <FILENAME>`
+
+Promote a managed script to **custom** (user-owned) status.
+
+#### Synopsis
+
+```
+iknot campaign override [OPTIONS] FILENAME
+```
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--campaign TEXT` | active campaign | Campaign to modify. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+
+After promotion:
+
+- The file is moved from `[managed]` to `[custom]` in `algorithm.lock`.
+- `iknot campaign sync` will never touch the file automatically again.
+- The on-disk file content is **not** modified.
+
+Use this when you want to fork a managed script and apply local modifications without IntraKnot trying to overwrite them on the next sync.
+
+---
+
+### `iknot campaign add-script <FILENAME>`
+
+Register an existing user-authored script as **custom** in `algorithm.lock`.
+
+#### Synopsis
+
+```
+iknot campaign add-script [OPTIONS] FILENAME
+```
+
+`FILENAME` is a path relative to the campaign's `algorithm/` directory, e.g. `"my_observable.py"` or `"post_process/analyse.py"`. The file must already exist on disk.
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--campaign TEXT` | active campaign | Campaign to modify. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+
+The file is added to the `[custom]` list in `algorithm.lock` so that sync commands know to leave it alone. Unlike `install`, this command does not download anything — it merely records pre-existing files that you authored yourself.
+
+---
+
+## Algorithm lock (`algorithm.lock`)
+
+Every campaign's `algorithm/` directory contains an `algorithm.lock` TOML file that tracks the provenance of each script:
+
+```
+campaigns/<CAMPAIGN_ID>/
+└── algorithm/
+    ├── algorithm.lock      # provenance tracking file
+    ├── run_dmrg.py         # managed entry (installed from intraknot package)
+    └── my_obs.py           # custom entry (user-authored)
+```
+
+The lock records two kinds of entries:
+
+**Managed** scripts
+: Installed from a known source (the `intraknot` package or a registered database). The stored SHA-256 digest lets `iknot campaign sync` detect upstream changes and local modifications without re-downloading the file.
+
+**Custom** scripts
+: User-authored scripts that IntraKnot never modifies or removes automatically.
+
+The lock file is included in each run's frozen `algorithm/` snapshot, ensuring full reproducibility — every run carries a record of exactly which version of each script it used.
 
 ---
 
