@@ -16,7 +16,8 @@ my_project/
 ├── configs/
 │   ├── slurm.toml      # master Slurm template — edit before first use
 │   ├── paths.toml      # filesystem paths for the target cluster
-│   └── tui.toml        # TUI settings (editor, etc.)
+│   ├── tui.toml        # TUI settings (editor, etc.)
+│   └── registry.yaml   # algorithm database registry (managed by iknot database)
 ├── campaigns/          # scientific groupings and run indexes
 ├── runs/               # simulation case directories
 └── notebooks/          # inspection and plotting notebooks
@@ -27,6 +28,7 @@ After running `iknot init`:
 1. Fill in `configs/paths.toml` with the cluster's filesystem layout.
 2. Run `iknot cluster sync` to query Slurm and populate `configs/cluster.yaml` with the available partitions, node hardware specs, and valid constraint values.
 3. Run `iknot cluster show` to read the discovered values, then open `configs/slurm.toml` and replace every `_init_` placeholder with the correct partition and constraint for your cluster.
+4. Optionally run `iknot database update` to fetch the latest manifest from any pre-registered algorithm databases into `configs/registry.yaml`.
 
 See [`iknot cluster`](cluster.md) for details on the discovery workflow.
 
@@ -78,6 +80,12 @@ Filesystem path settings for the target cluster:
 | `scratch_root` | Fast scratch filesystem root used by jobs for temporary data. |
 | `scratch_node` | Per-node local scratch, typically `/tmp/$USER`. |
 | `command` | Command used to invoke the runner script from Slurm, e.g. `uv run`. |
+
+#### `configs/registry.yaml`
+
+The unified algorithm database registry. Stores metadata for all registered external databases — their URLs, last-fetched timestamps, and the cached manifest of available scripts.
+
+The file is written with a minimal template on `iknot init`. Use `iknot database add`, `iknot database remove`, and `iknot database update` to manage its contents. See [`iknot database`](database.md) for details.
 
 #### `.gitignore`
 
