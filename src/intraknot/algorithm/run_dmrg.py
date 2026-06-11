@@ -384,12 +384,14 @@ def _init_mps(
             "Initializing product-state MPS (bond_dim=1, target_qn=%s)",
             target_qn,
         )
+        logger.info("")
         mps = init_mps(L, Spc, Op, bond_dim=1, target_qn=target_qn, seed=seed)
     else:
         logger.info(
             "Initializing random MPS: bond_dim=%d, seed=%d, target_qn=%s",
             bond_dim, seed, target_qn,
         )
+        logger.info("")
         mps = init_mps(L, Spc, Op, bond_dim=bond_dim, target_qn=target_qn, seed=seed)
 
     return mps, 0
@@ -572,7 +574,6 @@ def run(run_dir: Path) -> None:
             opts.n_sweeps = remaining
 
         # --- Run DMRG ---
-        logger.info("")
         summary = dmrg.run(mps, mpo, opts)
         # dmrg.ckpt is already written by Alice into attempt_dir after each sweep.
 
