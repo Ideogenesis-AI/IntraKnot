@@ -582,8 +582,8 @@ _REGISTRY_YAML_TEMPLATE = """\
 
 databases:
   intraknot-database:
-    url: https://github.com/Ideogenesis-AI/intraknot-database
-    registry_url: https://raw.githubusercontent.com/Ideogenesis-AI/intraknot-database/main/registry.yaml
+    url: https://github.com/Ideogenesis-AI/IntraKnot-Database
+    registry_url: https://raw.githubusercontent.com/Ideogenesis-AI/IntraKnot-Database/main/registry.yaml
     fetched_at: ''
     description: ''
 """
