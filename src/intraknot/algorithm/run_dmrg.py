@@ -506,6 +506,7 @@ def run(run_dir: Path) -> None:
     cfg_model = {
         "geometry": cfg.get("geometry", {}),
         "model":    cfg.get("model", {}),
+        "plugin":   cfg.get("plugin", {}),
     }
     cfg_algo = cfg.get("algorithm", {})
     cfg_output = cfg.get("output", {})
