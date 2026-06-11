@@ -49,6 +49,7 @@ from typing import Optional
 import click
 import yaml
 
+from .alg_lock import AlgorithmLock, _sha256_bytes, _sha256_path, make_managed_entry
 from .config import (
     MachineConfig,
     _merge_defaults,
@@ -59,9 +60,11 @@ from .config import (
     resolve_active_campaign as _resolve_active_campaign_base,
     write_data_gitignore,
     write_paths_toml,
+    write_registry_yaml,
     write_tui_toml,
     write_slurm_toml,
 )
+from .database import BUILTIN_SOURCE, DatabaseRegistry, _parse_source
 from .discover import discover_cluster, load_discovery, save_discovery
 from .launch import (
     create_campaign,
@@ -287,6 +290,7 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     slurm_path = configs_dir / "slurm.toml"
     paths_path = configs_dir / "paths.toml"
     tui_path = configs_dir / "tui.toml"
+    registry_path = configs_dir / "registry.yaml"
     if not slurm_path.exists():
         write_slurm_toml(slurm_path)
         click.echo(f"  created {slurm_path.relative_to(cwd)}")
@@ -296,6 +300,9 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
     if not tui_path.exists():
         write_tui_toml(tui_path)
         click.echo(f"  created {tui_path.relative_to(cwd)}")
+    if not registry_path.exists():
+        write_registry_yaml(registry_path)
+        click.echo(f"  created {registry_path.relative_to(cwd)}")
 
     # Data directories.
     for rel in (campaigns_root, runs_root, notebooks_root):
@@ -332,7 +339,8 @@ def cmd_init(campaigns_root: str, runs_root: str, notebooks_root: str) -> None:
 
     click.echo(
         "\nDone. Edit configs/slurm.toml and configs/paths.toml, then run "
-        "`iknot cluster sync` to discover available partitions and constraints."
+        "`iknot cluster sync` to discover available partitions and constraints.\n"
+        "Run `iknot database update` to fetch the algorithm database registry."
     )
 
 
@@ -401,6 +409,401 @@ def campaign_deactivate() -> None:
     click.echo("  unset INTRAKNOT_CAMPAIGN")
 
 
+@grp_campaign.command("install")
+@click.argument("source")
+@click.option("--as", "dest_name", default=None, metavar="FILENAME",
+              help="Override the destination filename inside algorithm/. "
+                   "Defaults to the basename of the source path.")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def campaign_install(
+    source: str,
+    dest_name: Optional[str],
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    machine_opt: Optional[str],
+) -> None:
+    """Install a script from a database into the campaign's algorithm/.
+
+    SOURCE is a source descriptor of the form "<db-name>:<path>", e.g.:
+
+    \b
+        intraknot-database:observables/spin_corr.py
+
+    The file is fetched over HTTP and recorded as a managed entry in
+    algorithm.lock. Use --as to install under a different filename.
+    """
+    import urllib.error
+
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    configs_dir = _configs_dir_path(machine_opt)
+    campaign_dir = Path(campaigns_root) / campaign_id
+    if not campaign_dir.exists():
+        click.echo(f"Error: campaign directory not found: {campaign_dir}", err=True)
+        sys.exit(1)
+
+    try:
+        db_name, file_path = _parse_source(source)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    # Determine destination path inside algorithm/.
+    if dest_name:
+        dest_rel = dest_name
+    else:
+        # Preserve the subdirectory structure from the source path.
+        dest_rel = file_path
+
+    alg_dir = campaign_dir / "algorithm"
+    dest_path = alg_dir / dest_rel
+
+    # Check if a managed entry already exists for this destination.
+    lock = AlgorithmLock.load(alg_dir / "algorithm.lock")
+    if lock.is_managed(dest_rel):
+        click.echo(
+            f"Error: {dest_rel!r} is already a managed entry. "
+            "Run `iknot campaign sync` to update it.",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Load the registry for database-sourced files.
+    reg = _load_registry(configs_dir)
+
+    click.echo(f"Fetching {source} …")
+    try:
+        content, sha256 = reg.resolve_file(source)
+    except (KeyError, ValueError) as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except urllib.error.HTTPError as exc:
+        click.echo(
+            f"Error: could not fetch {source!r} "
+            f"(HTTP {exc.code}: {exc.reason}).",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    # Write the file, creating subdirectories as needed.
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    dest_path.write_bytes(content)
+
+    # Determine installed_from_version for built-in sources.
+    installed_version: Optional[str] = None
+    if db_name == BUILTIN_SOURCE:
+        try:
+            from importlib.metadata import version as _pkg_version
+            installed_version = _pkg_version("intraknot")
+        except Exception:
+            pass
+
+    entry = make_managed_entry(
+        file=dest_rel,
+        source=source,
+        sha256=sha256,
+        installed_from_version=installed_version,
+    )
+    lock.add_managed(entry)
+    lock.save(alg_dir / "algorithm.lock")
+
+    click.echo(f"Installed {dest_rel} from {source}.")
+
+
+@grp_campaign.command("sync")
+@click.argument("files", nargs=-1, metavar="[FILE ...]")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite locally modified files instead of blocking.")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Accept all updates without prompting.")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def campaign_sync(
+    files: tuple,
+    force: bool,
+    yes: bool,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    machine_opt: Optional[str],
+) -> None:
+    """Sync managed algorithm scripts from their sources.
+
+    Without FILE arguments, all managed entries are checked. When FILE
+    arguments are given, only those entries are processed.
+
+    For each target file:
+
+    \b
+    1. If the on-disk content differs from the lock record, the file is
+       considered locally modified. Without --force, sync is blocked for
+       that file (promote it with `iknot campaign override`, or discard
+       local changes with --force).
+    2. If the file is unmodified, the upstream SHA-256 is checked. When it
+       differs, the updated file is downloaded and you are prompted to
+       confirm (skipped with --yes).
+
+    Files not listed in algorithm.lock are never touched.
+    """
+    import importlib.resources
+    import urllib.error
+
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    campaign_dir = Path(campaigns_root) / campaign_id
+    alg_dir = campaign_dir / "algorithm"
+    lock_path = alg_dir / "algorithm.lock"
+    lock = AlgorithmLock.load(lock_path)
+
+    if not lock.managed:
+        click.echo("No managed entries in algorithm.lock.")
+        return
+
+    # Determine which files to process.
+    if files:
+        targets = list(files)
+        unknown = [f for f in targets if not lock.is_managed(f)]
+        if unknown:
+            for f in unknown:
+                click.echo(f"Warning: {f!r} is not a managed entry — skipped.")
+            targets = [f for f in targets if lock.is_managed(f)]
+        if not targets:
+            return
+    else:
+        targets = list(lock.managed)
+
+    configs_dir = _configs_dir_path(machine_opt)
+    reg = _load_registry(configs_dir)
+
+    any_error = False
+    lock_changed = False
+
+    for filename in sorted(targets):
+        entry = lock.managed[filename]
+        file_path = alg_dir / filename
+
+        # --- Step 1: local modification check ---
+        if file_path.exists():
+            on_disk_sha = _sha256_path(file_path)
+            if on_disk_sha != entry.sha256:
+                if not force:
+                    click.echo(
+                        f"\n  {filename}  [managed, MODIFIED — local changes detected]"
+                    )
+                    click.echo(
+                        f"    Promote to custom:    "
+                        f"iknot campaign override {filename}"
+                    )
+                    click.echo(
+                        f"    Discard and update:   "
+                        f"iknot campaign sync --force {filename}"
+                    )
+                    any_error = True
+                    continue
+                # --force: proceed, treating the file as clean.
+
+        # --- Step 2: upstream staleness check ---
+        db_name, file_in_source = _parse_source(entry.source)
+
+        if db_name == BUILTIN_SOURCE:
+            # Hash the currently installed package file directly.
+            try:
+                upstream_bytes = (
+                    importlib.resources.files("intraknot")
+                    .joinpath(file_in_source)
+                    .read_bytes()
+                )
+                upstream_sha = _sha256_bytes(upstream_bytes)
+            except Exception as exc:
+                click.echo(f"  {filename}: could not read upstream — {exc}", err=True)
+                any_error = True
+                continue
+        else:
+            # Check the cached registry SHA first to avoid a download.
+            upstream_sha = reg.lookup_sha256(entry.source)
+            if upstream_sha is None:
+                # Registry not fetched or script not listed — download to check.
+                click.echo(f"  {filename}: registry SHA unknown, downloading to check …")
+                try:
+                    upstream_bytes, upstream_sha = reg.resolve_file(entry.source)
+                except (KeyError, ValueError, urllib.error.HTTPError) as exc:
+                    click.echo(f"  {filename}: fetch failed — {exc}", err=True)
+                    any_error = True
+                    continue
+            else:
+                upstream_bytes = None  # will fetch below only if needed
+
+        if upstream_sha == entry.sha256:
+            click.echo(f"  {filename}: up to date.")
+            continue
+
+        # Upstream has changed — offer to update.
+        click.echo(f"  {filename}: upstream has changed (local sha256: {entry.sha256[:12]}…, upstream: {upstream_sha[:12]}…)")
+
+        if not yes:
+            if not click.confirm(f"    Update {filename}?"):
+                click.echo(f"    Skipped.")
+                continue
+
+        # Download the updated content if not already in memory.
+        if upstream_bytes is None:
+            try:
+                upstream_bytes, upstream_sha = reg.resolve_file(entry.source)
+            except Exception as exc:
+                click.echo(f"  {filename}: fetch failed — {exc}", err=True)
+                any_error = True
+                continue
+
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(upstream_bytes)
+
+        # Determine installed_from_version for built-in sources.
+        new_version: Optional[str] = entry.installed_from_version
+        if db_name == BUILTIN_SOURCE:
+            try:
+                from importlib.metadata import version as _pkg_version
+                new_version = _pkg_version("intraknot")
+            except Exception:
+                pass
+
+        lock.add_managed(make_managed_entry(
+            file=filename,
+            source=entry.source,
+            sha256=upstream_sha,
+            installed_from_version=new_version,
+        ))
+        lock_changed = True
+        click.echo(f"    Updated {filename}.")
+
+    if lock_changed:
+        lock.save(lock_path)
+
+    if any_error:
+        sys.exit(1)
+
+
+@grp_campaign.command("override")
+@click.argument("filename")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+def campaign_override(
+    filename: str,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+) -> None:
+    """Promote a managed script to custom (user-owned) status.
+
+    After promotion the file is excluded from `iknot campaign sync` and
+    will never be overwritten automatically. The on-disk file is not
+    modified.
+    """
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    alg_dir = Path(campaigns_root) / campaign_id / "algorithm"
+    lock_path = alg_dir / "algorithm.lock"
+    lock = AlgorithmLock.load(lock_path)
+
+    try:
+        lock.promote_to_custom(filename)
+    except KeyError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    lock.save(lock_path)
+    click.echo(
+        f"Promoted {filename!r} to custom. "
+        "It will no longer be touched by `iknot campaign sync`."
+    )
+
+
+@grp_campaign.command("add-script")
+@click.argument("filename")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+def campaign_add_script(
+    filename: str,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+) -> None:
+    """Register an existing user-authored script as custom in algorithm.lock.
+
+    FILENAME is a path relative to the campaign's algorithm/ directory,
+    e.g. "my_observable.py" or "post_process/analyse.py".
+
+    The file must already exist on disk. It is added to the [custom] list
+    in algorithm.lock so that sync commands know to leave it alone.
+    """
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    alg_dir = Path(campaigns_root) / campaign_id / "algorithm"
+    file_path = alg_dir / filename
+    if not file_path.exists():
+        click.echo(
+            f"Error: file not found: {file_path}\n"
+            "Place the script in the campaign's algorithm/ directory first.",
+            err=True,
+        )
+        sys.exit(1)
+
+    lock_path = alg_dir / "algorithm.lock"
+    lock = AlgorithmLock.load(lock_path)
+
+    if lock.is_managed(filename):
+        click.echo(
+            f"Error: {filename!r} is already a managed entry. "
+            "Promote it first with `iknot campaign override`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    lock.add_custom(filename)
+    lock.save(lock_path)
+    click.echo(f"Registered {filename!r} as custom in algorithm.lock.")
+
+
 @grp_campaign.command("status")
 def campaign_status() -> None:
     """Show the currently active campaign."""
@@ -421,6 +824,183 @@ def campaign_status() -> None:
     else:
         click.echo("No active campaign.")
         click.echo("Use `iknot campaign activate <id>` to set one.")
+
+
+# ---------------------------------------------------------------------------
+# iknot database
+# ---------------------------------------------------------------------------
+
+def _configs_dir_path(machine_opt: Optional[str]) -> Path:
+    """Return the configs/ directory path, defaulting to ./configs."""
+    return Path(machine_opt) if machine_opt else Path.cwd() / "configs"
+
+
+def _load_registry(configs_dir: Path) -> DatabaseRegistry:
+    """Load the database registry from configs/registry.yaml."""
+    return DatabaseRegistry.load(configs_dir / "registry.yaml")
+
+
+@main.group("database")
+def grp_database() -> None:
+    """Manage algorithm databases."""
+
+
+@grp_database.command("add")
+@click.argument("name")
+@click.argument("url")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def database_add(name: str, url: str, machine_opt: Optional[str]) -> None:
+    """Register a new algorithm database and fetch its registry.
+
+    NAME is the short identifier used in source descriptors
+    (e.g. "intraknot-database"). URL is the GitHub repository URL.
+
+    The remote registry.yaml is fetched immediately. If the repository
+    does not yet exist the command fails with a clear error; the URL is
+    not registered until a successful fetch.
+    """
+    import urllib.error
+    configs_dir = _configs_dir_path(machine_opt)
+    reg = _load_registry(configs_dir)
+
+    if name in reg.entries:
+        click.echo(
+            f"Database {name!r} is already registered. "
+            "Use `iknot database update` to refresh its manifest.",
+            err=True,
+        )
+        sys.exit(1)
+
+    click.echo(f"Fetching registry from {url} …")
+    try:
+        entry = reg.add(name, url)
+    except ValueError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+    except urllib.error.HTTPError as exc:
+        click.echo(
+            f"Error: could not fetch registry.yaml from {url!r} "
+            f"(HTTP {exc.code}: {exc.reason}).\n"
+            "Make sure the repository exists and the URL is correct.",
+            err=True,
+        )
+        sys.exit(1)
+    except Exception as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    reg.save(configs_dir / "registry.yaml")
+
+    n_scripts = sum(
+        len(cat.scripts) for cat in entry.categories.values()
+    )
+    click.echo(
+        f"Registered {name!r}: {entry.description or '(no description)'} "
+        f"— {len(entry.categories)} categories, {n_scripts} script(s)."
+    )
+
+
+@grp_database.command("remove")
+@click.argument("name")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def database_remove(name: str, machine_opt: Optional[str]) -> None:
+    """Remove a registered database from the registry.
+
+    This does not affect any scripts already installed in campaigns.
+    """
+    configs_dir = _configs_dir_path(machine_opt)
+    reg = _load_registry(configs_dir)
+
+    if name not in reg.entries:
+        click.echo(f"Database {name!r} is not registered.", err=True)
+        sys.exit(1)
+
+    del reg.entries[name]
+    reg.save(configs_dir / "registry.yaml")
+    click.echo(f"Removed database {name!r}.")
+
+
+@grp_database.command("list")
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def database_list(machine_opt: Optional[str]) -> None:
+    """List all registered databases and their contents."""
+    configs_dir = _configs_dir_path(machine_opt)
+    reg = _load_registry(configs_dir)
+
+    if not reg.entries:
+        click.echo("No databases registered.")
+        click.echo("Add one with: iknot database add <name> <url>")
+        return
+
+    for name, entry in sorted(reg.entries.items()):
+        fetched = entry.fetched_at or "never"
+        click.echo(f"\n{name}")
+        click.echo(f"  URL         : {entry.url}")
+        click.echo(f"  Last fetched: {fetched}")
+        if entry.description:
+            click.echo(f"  Description : {entry.description}")
+        if entry.categories:
+            for cat_name, cat in sorted(entry.categories.items()):
+                n = len(cat.scripts)
+                click.echo(f"  {cat_name} ({n} script{'s' if n != 1 else ''})")
+                for script in cat.scripts:
+                    click.echo(f"    {script.file:<45} {script.description}")
+        else:
+            click.echo("  (registry not yet fetched — run `iknot database update`)")
+
+
+@grp_database.command("update")
+@click.argument("name", required=False, default=None)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+def database_update(name: Optional[str], machine_opt: Optional[str]) -> None:
+    """Re-fetch the registry manifest for one or all databases.
+
+    When NAME is given, only that database is updated. Otherwise all
+    registered databases are refreshed.
+    """
+    import urllib.error
+    configs_dir = _configs_dir_path(machine_opt)
+    reg = _load_registry(configs_dir)
+
+    if not reg.entries:
+        click.echo("No databases registered. Add one with `iknot database add`.")
+        return
+
+    targets = [name] if name else list(reg.entries)
+
+    any_error = False
+    for db_name in targets:
+        if db_name not in reg.entries:
+            click.echo(f"Error: database {db_name!r} is not registered.", err=True)
+            any_error = True
+            continue
+        click.echo(f"Updating {db_name} …")
+        try:
+            entry = reg.update(db_name)
+            n_scripts = sum(len(cat.scripts) for cat in entry.categories.values())
+            click.echo(
+                f"  {db_name}: {len(entry.categories)} categories, "
+                f"{n_scripts} script(s)."
+            )
+        except urllib.error.HTTPError as exc:
+            click.echo(
+                f"  Error: could not fetch registry for {db_name!r} "
+                f"(HTTP {exc.code}: {exc.reason}).",
+                err=True,
+            )
+            any_error = True
+        except Exception as exc:
+            click.echo(f"  Error: {exc}", err=True)
+            any_error = True
+
+    reg.save(configs_dir / "registry.yaml")
+
+    if any_error:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
