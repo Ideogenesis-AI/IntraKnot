@@ -140,6 +140,26 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
+class _ShortLevelFormatter(logging.Formatter):
+    """Formatter that abbreviates WARNING to WARN so the bracketed level tag
+    is always exactly 6 characters (`[WARN ]`, `[INFO ]`, …) rather than
+    overflowing to `[WARNING]`.
+    """
+
+    _ABBREV: Dict[str, str] = {"WARNING": "WARN"}
+
+    def format(self, record: logging.LogRecord) -> str:
+        original = record.levelname
+        record.levelname = self._ABBREV.get(original, original)
+        formatted = super().format(record)
+        record.levelname = original
+        return formatted
+
+
+# ---------------------------------------------------------------------------
 # Attempt directory resolution
 # ---------------------------------------------------------------------------
 
@@ -497,15 +517,19 @@ def run(run_dir: Path) -> None:
 
     # Configure Alice's own logger: stream (INFO+) and alice.log (DEBUG+).
     alice.configure_logging(log_file=str(attempt_dir / "alice.log"))
+    # Replace the formatter on Alice's file handler so alice.log also uses the
+    # abbreviated WARN tag.  Alice attaches handlers in configure_logging(), so
+    # we patch them here without modifying the Alice package.
+    _log_fmt = dict(fmt="%(asctime)s [%(levelname)-5s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    for _h in logging.getLogger("alice").handlers:
+        if isinstance(_h, logging.FileHandler):
+            _h.setFormatter(_ShortLevelFormatter(**_log_fmt))
     # Attach a second file handler to the root logger so that all records
     # (IntraKnot's own + Alice's via propagation) also land in iknot.log.
     iknot_log = attempt_dir / "iknot.log"
     file_handler = logging.FileHandler(iknot_log)
     file_handler.setLevel(logging.INFO)
-    file_handler.setFormatter(logging.Formatter(
-        fmt="%(asctime)s [%(levelname)-5s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    ))
+    file_handler.setFormatter(_ShortLevelFormatter(**_log_fmt))
     logging.getLogger().addHandler(file_handler)
     # The root logger's default level is WARNING, which silently drops INFO
     # records from this runner before they reach any handler. Set the runner
