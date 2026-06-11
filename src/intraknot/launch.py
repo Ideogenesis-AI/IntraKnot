@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from .alg_lock import AlgorithmLock, _sha256_path, make_managed_entry
 from .config import (
     MachineConfig,
     SlurmJobConfig,
@@ -420,6 +421,48 @@ def _copy_algorithm(src: Path, dest_dir: Path) -> None:
     shutil.copy2(src, alg_dir / src.name)
 
 
+def _write_initial_lock(campaign_dir: Path, algorithm: str) -> None:
+    """Write `algorithm/algorithm.lock` for a freshly created campaign.
+
+    Records the copied runner script as the single managed entry, sourced
+    from the installed `intraknot` package.
+
+    Parameters
+    ----------
+    campaign_dir:
+        Campaign directory whose `algorithm/` subdirectory was just
+        populated by `_copy_algorithm`.
+    algorithm:
+        Algorithm name, e.g. `"dmrg"`.
+    """
+    alg_dir = campaign_dir / "algorithm"
+    script_file = f"run_{algorithm}.py"
+    script_path = alg_dir / script_file
+    if not script_path.exists():
+        # Should not happen under normal operation; skip silently rather than
+        # crashing the campaign creation.
+        return
+
+    sha256 = _sha256_path(script_path)
+
+    # Try to record the intraknot package version for traceability.
+    try:
+        from importlib.metadata import version as _pkg_version
+        pkg_version: Optional[str] = _pkg_version("intraknot")
+    except Exception:
+        pkg_version = None
+
+    entry = make_managed_entry(
+        file=script_file,
+        source=f"intraknot:algorithm/{script_file}",
+        sha256=sha256,
+        installed_from_version=pkg_version,
+    )
+    lock = AlgorithmLock()
+    lock.add_managed(entry)
+    lock.save(alg_dir / "algorithm.lock")
+
+
 def _find_exec_script(
     script_name: str,
     run_dir: Path,
@@ -593,9 +636,10 @@ def create_campaign(
     # Logs directory for array job output.
     (campaign_dir / "logs").mkdir()
 
-    # Copy algorithm runner.
+    # Copy algorithm runner and write the initial algorithm.lock.
     src = _algorithm_source_path(algorithm)
     _copy_algorithm(src, campaign_dir)
+    _write_initial_lock(campaign_dir, algorithm)
 
     return campaign_dir
 
@@ -737,13 +781,16 @@ def create_run(
         MainStatus(state=RunState.PENDING),
     )
 
-    # Copy algorithm runner from campaign.
+    # Copy the entire campaign algorithm/ directory into the run so that all
+    # managed scripts, custom scripts, and algorithm.lock are frozen together.
     campaign_alg_dir = campaign_dir / "algorithm"
-    runner = next(campaign_alg_dir.glob(f"run_{algorithm}.py"), None)
-    if runner is None:
-        # Fall back to bundled source.
+    run_alg_dir = run_dir / "algorithm"
+    if campaign_alg_dir.exists():
+        shutil.copytree(campaign_alg_dir, run_alg_dir)
+    else:
+        # Fallback for legacy campaigns that have no algorithm/ directory.
         runner = _algorithm_source_path(algorithm)
-    _copy_algorithm(runner, run_dir)
+        _copy_algorithm(runner, run_dir)
 
     # Register the run in the campaign's runs.csv.
     _register_run_in_campaign(campaign_dir, run_id, scan_id=scan_id)
