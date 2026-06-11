@@ -572,6 +572,22 @@ _TUI_TOML_TEMPLATE = """\
 editor = "vi"
 """
 
+_REGISTRY_YAML_TEMPLATE = """\
+# configs/registry.yaml
+# Unified algorithm database registry.
+# Managed by iknot database commands — do not edit manually.
+#
+# Add a database:  iknot database add <name> <url>
+# Update all:      iknot database update
+
+databases:
+  intraknot-database:
+    url: https://github.com/Ideogenesis-AI/intraknot-database
+    registry_url: https://raw.githubusercontent.com/Ideogenesis-AI/intraknot-database/main/registry.yaml
+    fetched_at: ''
+    description: ''
+"""
+
 _GITIGNORE_CONTENT = "*\n"
 
 
@@ -609,6 +625,22 @@ def write_tui_toml(path: Path) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_TUI_TOML_TEMPLATE)
+
+
+def write_registry_yaml(path: Path) -> None:
+    """Write the `registry.yaml` template to `path`.
+
+    The template pre-registers the `intraknot-database` entry with an empty
+    `fetched_at` field. Running `iknot database update` will populate it once
+    the repository is live.
+
+    Parameters
+    ----------
+    path:
+        Destination file path (typically `configs/registry.yaml`).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_REGISTRY_YAML_TEMPLATE)
 
 
 def write_data_gitignore(directory: Path) -> None:
