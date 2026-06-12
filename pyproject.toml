@@ -34,8 +34,8 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Physics",
 ]
 dependencies = [
-  "alice-net>=0.1.1",
-  "nicole>=0.3.6",
+  "alice-net>=0.1.6",
+  "nicole>=0.3.7",
   "numpy>=2.0",
   "torch>=2.5",
   "pyyaml>=6.0",
