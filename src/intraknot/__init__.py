@@ -18,6 +18,11 @@
 
 """IntraKnot: HPC management for tensor network and AI studies of quantum lattice models."""
 
-__version__ = "0.1.0"
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("intraknot")
+except PackageNotFoundError:
+    __version__ = "unknown"
 
 __all__ = ["__version__"]
