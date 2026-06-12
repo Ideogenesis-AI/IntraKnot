@@ -808,6 +808,14 @@ class DashboardApp(App):
         run_dir = self._runs_root / run.run_id
         files: List[Tuple[str, Optional[Path]]] = []
 
+        # info.json from the current attempt directory (first in the list).
+        attempt_dir = _current_attempt_dir(run_dir)
+        if attempt_dir is not None:
+            info_path: Optional[Path] = attempt_dir / "info.json"
+            files.append(("info.json", info_path if info_path.exists() else None))
+        else:
+            files.append(("info.json", None))
+
         # Algorithm logs from the current attempt directory.
         files.append(("iknot.log", run.iknot_log_path))
         files.append(("alice.log", run.alice_log_path))
