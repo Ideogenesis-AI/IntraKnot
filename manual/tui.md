@@ -58,13 +58,29 @@ iknot tui [OPTIONS]
 |---|---|
 | `c` | Open campaign selector overlay. Arrow keys navigate; Enter switches. |
 | `r` | Refresh all run data from disk (re-reads `runs.csv`, `status.json`, `info.json`). |
-| `l` | Open `iknot.log` for the selected run in the configured editor. |
-| `a` | Open `alice.log` for the selected run in the configured editor. |
+| `v` | Open the file viewer overlay for the selected run (see [View overlay](#view-overlay)). |
+| `l` | Open `iknot.log` for the selected run in the configured editor (shortcut; also available via `v`). |
+| `a` | Open `alice.log` for the selected run in the configured editor (shortcut; also available via `v`). |
 | `← →` (or `[ ]`) | Page through the run list (6 runs per page). |
 | `↑ ↓` | Move the row cursor within the current page. |
 | `q` | Quit. |
 
 The `←` / `→` arrow keys and `[` / `]` both perform page navigation. The footer shows `←` / `→` labels for the corresponding bindings; clicking them in a mouse-enabled terminal also works.
+
+### View overlay
+
+Pressing `v` opens a file picker listing all viewable files for the selected run. Select a file with Enter to open it in the configured editor. Files that do not yet exist on disk are shown but cannot be opened (a warning notification appears instead).
+
+Files are listed in the following order:
+
+| File | Location |
+|---|---|
+| `info.json` | `main/current/info.json` — DMRG observables written by Alice at the end of a sweep. |
+| `iknot.log` | `main/current/iknot.log` — combined `INFO`-level log from IntraKnot and Alice. |
+| `alice.log` | `main/current/alice.log` — `DEBUG`-level Alice output (verbose, timestamped). |
+| `status.json` | `main/status.json` — run state machine status. |
+| `slurm .out` | `main/logs/slurm-<job>.out` — Slurm stdout (most recent job). |
+| `slurm .err` | `main/logs/slurm-<job>.err` — Slurm stderr (most recent job). |
 
 ### Run table columns
 
