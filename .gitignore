@@ -8,6 +8,8 @@
 # Yuzuha cache for canonical basis data
 .yuzuha/
 
+# IntraKnot campaign state file
+.iknot_state
 
 
 # ------------------------------------------------------- #
