@@ -246,6 +246,46 @@ iknot run start [OPTIONS] [RUN_ID]
 
 ---
 
+### `iknot run resume <RUN_ID>`
+
+Creates the next attempt for a failed run and optionally resubmits it to Slurm. The scientific configuration (`config.toml`) is never modified; only the execution infrastructure is recreated.
+
+Before resuming, the command reads `main/status.json` and verifies that the run is resumable: `state` must be `failed` and `restartable` must be `true`. If either condition is not met, the command exits with an error and no files are modified.
+
+See `iknot campaign resume` for the full table of failure reasons and their restartability.
+
+#### Synopsis
+
+```
+iknot run resume [OPTIONS] RUN_ID
+```
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--runs-root PATH` | `runs` | Parent directory for runs. |
+| `--machine PATH` | `./configs` | Path to the `configs/` directory. |
+| `--no-submit` | off | Create the attempt directory and write the Slurm script without calling `sbatch`. |
+
+#### Attempt directory layout
+
+Each resumption writes a fresh `main/submit.slurm`. The runner creates the next numbered attempt directory when the job starts:
+
+```
+runs/<RUN_ID>/main/
+├── status.json
+├── current -> attempts/attempt_02   # updated symlink
+├── job_id.txt                       # updated with new Slurm job ID
+├── submit.slurm                     # regenerated from slurm.toml
+├── logs/
+└── attempts/
+    ├── attempt_01/                  # previous (failed) attempt
+    └── attempt_02/                  # newly created attempt
+```
+
+---
+
 ### `iknot run exec <SCRIPT_NAME> <RUN_ID>`
 
 Runs a follow-up (exec) script against a completed run. Exec jobs are bespoke Python scripts for post-processing, measurement, or analysis that depend on the run's output (e.g. computing a structure factor or entanglement spectrum from the converged ground state).
