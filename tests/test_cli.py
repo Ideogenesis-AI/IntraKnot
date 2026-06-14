@@ -687,7 +687,7 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "run", "r1",
+            ["run", "resume", "r1",
              "--runs-root", str(runs_root),
              "--no-submit"],
         )
@@ -698,7 +698,7 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "run", "nonexistent",
+            ["run", "resume", "nonexistent",
              "--runs-root", str(tmp_path / "runs")],
         )
         assert result.exit_code != 0
@@ -717,8 +717,8 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "campaign",
-             "--id", "c1",
+            ["campaign", "resume",
+             "--campaign", "c1",
              "--campaigns-root", str(camps_root),
              "--runs-root", str(runs_root),
              "--no-submit"],
