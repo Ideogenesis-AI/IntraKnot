@@ -79,7 +79,7 @@ from .launch import (
     write_exec_slurm_script,
     write_slurm_script,
 )
-from .resume import find_resumable_runs, is_resumable, resume_campaign, resume_run
+from .resume import resume_campaign, resume_run
 from .status import read_status, MainStatus
 
 
@@ -826,6 +826,49 @@ def campaign_status() -> None:
         click.echo("Use `iknot campaign activate <id>` to set one.")
 
 
+@grp_campaign.command("resume")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+@click.option("--runs-root", default="runs", show_default=True)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
+@click.option("--no-submit", is_flag=True, default=False,
+              help="Create attempt directories without submitting to Slurm.")
+def campaign_resume(
+    campaign_id: Optional[str],
+    campaigns_root: str,
+    runs_root: str,
+    machine_opt: Optional[str],
+    no_submit: bool,
+) -> None:
+    """Resume all resumable runs in a campaign.
+
+    Iterates over every run listed in the campaign's `runs.csv` and calls
+    `iknot run resume` for each that is currently resumable (state `failed`
+    and `restartable = true`).
+    """
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    machine = _load_machine(machine_opt)
+    campaign_dir = Path(campaigns_root) / campaign_id
+    resumed = resume_campaign(campaign_dir, Path(runs_root), machine, submit=not no_submit)
+    if resumed:
+        for p in resumed:
+            click.echo(f"  resumed: {p}")
+        click.echo(f"\nResumed {len(resumed)} run(s).")
+    else:
+        click.echo("No resumable runs found.")
+
+
 # ---------------------------------------------------------------------------
 # iknot database
 # ---------------------------------------------------------------------------
@@ -1451,28 +1494,28 @@ def run_delete(
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# iknot resume
-# ---------------------------------------------------------------------------
-
-@main.group("resume")
-def grp_resume() -> None:
-    """Create new attempts for failed or interrupted runs."""
 
 
-@grp_resume.command("run")
+@grp_run.command("resume")
 @click.argument("run_id")
 @click.option("--runs-root", default="runs", show_default=True)
-@click.option("--machine", "machine_opt", default=None)
+@click.option("--machine", "machine_opt", default=None,
+              help="Path to configs/ directory. Defaults to ./configs.")
 @click.option("--no-submit", is_flag=True, default=False,
               help="Create attempt directory without submitting to Slurm.")
-def resume_run_cmd(
+def run_resume(
     run_id: str,
     runs_root: str,
     machine_opt: Optional[str],
     no_submit: bool,
 ) -> None:
-    """Resume a single failed run."""
+    """Resume a single failed run by creating the next attempt.
+
+    Reads `main/status.json` to verify the run is resumable (state is
+    `failed` and `restartable` is `true`), then writes a fresh Slurm
+    script and optionally submits it with `sbatch`.  The scientific
+    configuration in `config.toml` is never modified.
+    """
     machine = _load_machine(machine_opt)
     run_dir = Path(runs_root) / run_id
     if not run_dir.exists():
@@ -1484,37 +1527,6 @@ def resume_run_cmd(
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-
-@grp_resume.command("campaign")
-@click.option("--id", "campaign_id", default=None)
-@click.option("--campaigns-root", default="campaigns", show_default=True)
-@click.option("--runs-root", default="runs", show_default=True)
-@click.option("--machine", "machine_opt", default=None)
-@click.option("--no-submit", is_flag=True, default=False)
-def resume_campaign_cmd(
-    campaign_id: Optional[str],
-    campaigns_root: str,
-    runs_root: str,
-    machine_opt: Optional[str],
-    no_submit: bool,
-) -> None:
-    """Resume all resumable runs in a campaign."""
-    if campaign_id is None:
-        campaign_id, _ = _resolve_active_campaign()
-    if campaign_id is None:
-        click.echo("Error: no campaign specified.", err=True)
-        sys.exit(1)
-
-    machine = _load_machine(machine_opt)
-    campaign_dir = Path(campaigns_root) / campaign_id
-    resumed = resume_campaign(campaign_dir, Path(runs_root), machine, submit=not no_submit)
-    if resumed:
-        for p in resumed:
-            click.echo(f"  resumed: {p}")
-        click.echo(f"\nResumed {len(resumed)} run(s).")
-    else:
-        click.echo("No resumable runs found.")
 
 
 # ---------------------------------------------------------------------------
