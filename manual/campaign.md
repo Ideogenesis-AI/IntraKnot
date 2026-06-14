@@ -288,6 +288,67 @@ Use `iknot campaign activate <id>` to set one.
 
 ---
 
+### `iknot campaign resume`
+
+Iterates over every run listed in the campaign's `runs.csv` and resumes each one that is currently resumable (state is `failed` and `restartable` is `true`). Each resumed run gets a fresh Slurm script and, unless `--no-submit` is given, is resubmitted to the scheduler.
+
+The scientific configuration (`config.toml`) of each run is never modified.
+
+#### Synopsis
+
+```
+iknot campaign resume [OPTIONS]
+```
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--campaign TEXT` | active campaign | Campaign ID. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaigns. |
+| `--runs-root PATH` | `runs` | Parent directory for runs. |
+| `--machine PATH` | `./configs` | Path to the `configs/` directory. |
+| `--no-submit` | off | Create attempt directories without submitting to Slurm. |
+
+#### Output example
+
+```
+  resumed: runs/chi256/main/attempts/attempt_02
+  resumed: runs/chi512/main/attempts/attempt_03
+
+Resumed 2 run(s).
+```
+
+If no resumable runs are found:
+
+```
+No resumable runs found.
+```
+
+#### Restartability
+
+A run is resumable when **both** of the following are true in `main/status.json`:
+
+- `state` is `failed`
+- `restartable` is `true`
+
+The `restartable` flag is set by the algorithm runner script. It is `true` only for failure modes where resubmitting the same configuration is safe:
+
+| `reason` | Retryable | Notes |
+|---|---|---|
+| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. |
+| `out_of_memory` | yes | Job was killed by the OOM killer; increase `mem` in `slurm.toml` if needed. |
+| `scheduler_failure` | yes | Slurm node failure or preemption; retry unchanged. |
+| `checkpoint_missing` | yes | Expected checkpoint not found; retry from scratch or earlier checkpoint. |
+| `not_converged` | yes | Sweep loop finished without meeting the convergence threshold; resume to continue sweeping from the last checkpoint. |
+| `max_sweeps_reached` | no | Sweep budget exhausted; increase `max_sweeps` in `config.toml`. |
+| `bad_parameters` | no | Configuration error; fix `config.toml` and create a new run instead. |
+| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code version. |
+| `nan_detected` | no | Numerical instability; requires parameter changes. |
+| `linear_algebra_error` | no | Low-level linear algebra failure; requires investigation. |
+
+---
+
 ## Active-campaign resolution order
 
 Commands that accept a `--campaign` option resolve the campaign as follows when the option is omitted:
@@ -295,4 +356,3 @@ Commands that accept a `--campaign` option resolve the campaign as follows when 
 1. `INTRAKNOT_CAMPAIGN` environment variable.
 2. `active_campaign` key in `.iknot_state` at the project root.
 3. `None` — the command errors with a message asking you to specify a campaign.
-
