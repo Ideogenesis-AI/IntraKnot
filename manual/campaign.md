@@ -131,7 +131,7 @@ intraknot-database:observables/spin_corr.py
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--as FILENAME` | (same as source path) | Destination filename inside `algorithm/`. Relative subdirectory structure from the source path is preserved by default. |
+| `--as FILENAME` | (basename of source path) | Destination filename inside `algorithm/`. Only the basename of the source path is used by default; subdirectory structure is not preserved. |
 | `--campaign TEXT` | active campaign | Campaign to install into. |
 | `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
 | `--machine PATH` | `./configs` | Path to the `configs/` directory (for `registry.yaml`). |
@@ -143,6 +143,30 @@ intraknot-database:observables/spin_corr.py
 3. Records the file as a **managed entry** in `algorithm.lock` with its SHA-256 digest and source descriptor.
 
 Once installed, `iknot campaign sync` will track the file and notify you of upstream changes.
+
+---
+
+### `iknot campaign uninstall <FILENAME>`
+
+Remove a script from the campaign's `algorithm/` directory and deregister it from `algorithm.lock`.
+
+#### Synopsis
+
+```
+iknot campaign uninstall [OPTIONS] FILENAME
+```
+
+`FILENAME` is the script's filename inside `algorithm/`, e.g. `intrcmap_bfg.py`. It must be tracked in `algorithm.lock` (either managed or custom).
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--keep-file` | off | Deregister from `algorithm.lock` without deleting the file from disk. |
+| `--campaign TEXT` | active campaign | Campaign to modify. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+
+By default, the file is removed from disk and deregistered from `algorithm.lock`. Pass `--keep-file` to only remove the lock entry, leaving the file on disk as an untracked script.
 
 ---
 
@@ -288,6 +312,67 @@ Use `iknot campaign activate <id>` to set one.
 
 ---
 
+### `iknot campaign resume`
+
+Iterates over every run listed in the campaign's `runs.csv` and resumes each one that is currently resumable (state is `failed` and `restartable` is `true`). Each resumed run gets a fresh Slurm script and, unless `--no-submit` is given, is resubmitted to the scheduler.
+
+The scientific configuration (`config.toml`) of each run is never modified.
+
+#### Synopsis
+
+```
+iknot campaign resume [OPTIONS]
+```
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `--campaign TEXT` | active campaign | Campaign ID. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaigns. |
+| `--runs-root PATH` | `runs` | Parent directory for runs. |
+| `--machine PATH` | `./configs` | Path to the `configs/` directory. |
+| `--no-submit` | off | Create attempt directories without submitting to Slurm. |
+
+#### Output example
+
+```
+  resumed: runs/chi256/main/attempts/attempt_02
+  resumed: runs/chi512/main/attempts/attempt_03
+
+Resumed 2 run(s).
+```
+
+If no resumable runs are found:
+
+```
+No resumable runs found.
+```
+
+#### Restartability
+
+A run is resumable when **both** of the following are true in `main/status.json`:
+
+- `state` is `failed`
+- `restartable` is `true`
+
+The `restartable` flag is set by the algorithm runner script. It is `true` only for failure modes where resubmitting the same configuration is safe:
+
+| `reason` | Retryable | Notes |
+|---|---|---|
+| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. |
+| `out_of_memory` | yes | Job was killed by the OOM killer; increase `mem` in `slurm.toml` if needed. |
+| `scheduler_failure` | yes | Slurm node failure or preemption; retry unchanged. |
+| `checkpoint_missing` | yes | Expected checkpoint not found; retry from scratch or earlier checkpoint. |
+| `not_converged` | yes | Sweep loop finished without meeting the convergence threshold; resume to continue sweeping from the last checkpoint. |
+| `max_sweeps_reached` | no | Sweep budget exhausted; increase `max_sweeps` in `config.toml`. |
+| `bad_parameters` | no | Configuration error; fix `config.toml` and create a new run instead. |
+| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code version. |
+| `nan_detected` | no | Numerical instability; requires parameter changes. |
+| `linear_algebra_error` | no | Low-level linear algebra failure; requires investigation. |
+
+---
+
 ## Active-campaign resolution order
 
 Commands that accept a `--campaign` option resolve the campaign as follows when the option is omitted:
@@ -295,4 +380,3 @@ Commands that accept a `--campaign` option resolve the campaign as follows when 
 1. `INTRAKNOT_CAMPAIGN` environment variable.
 2. `active_campaign` key in `.iknot_state` at the project root.
 3. `None` — the command errors with a message asking you to specify a campaign.
-

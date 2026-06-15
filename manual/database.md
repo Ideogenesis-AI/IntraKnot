@@ -1,6 +1,6 @@
 # `iknot database`
 
-An algorithm database is a GitHub repository that provides a curated collection of reusable algorithm scripts — observables, model definitions, colormaps, post-processing utilities, and similar components. Scripts are catalogued in a `registry.yaml` manifest at the repository root.
+An algorithm database is a GitHub repository that provides a curated collection of reusable algorithm scripts — observables, model definitions, interaction maps, post-processing utilities, and similar components. Scripts are catalogued in a `registry.yaml` manifest at the repository root.
 
 IntraKnot communicates with databases purely over HTTP. It fetches the `registry.yaml` manifest to discover available scripts, then fetches individual files on demand. No git cloning is performed.
 
@@ -101,10 +101,11 @@ intraknot-database
   URL         : https://github.com/Ideogenesis-AI/IntraKnot-Database
   Last fetched: 2026-06-11
   Description : Community algorithm scripts for IntraKnot
+
   observables (3 scripts)
-    observables/spin_corr.py      Spin-spin correlation function
-    observables/entanglement.py   Entanglement entropy profile
-    observables/current.py        Bond current observable
+    spin_corr.py      Spin-spin correlation function
+    entanglement.py   Entanglement entropy profile
+    current.py        Bond current observable
 ```
 
 ---

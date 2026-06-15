@@ -687,7 +687,7 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "run", "r1",
+            ["run", "resume", "r1",
              "--runs-root", str(runs_root),
              "--no-submit"],
         )
@@ -698,7 +698,7 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "run", "nonexistent",
+            ["run", "resume", "nonexistent",
              "--runs-root", str(tmp_path / "runs")],
         )
         assert result.exit_code != 0
@@ -717,8 +717,8 @@ class TestResumeCLI:
         runner = CliRunner()
         result = runner.invoke(
             main,
-            ["resume", "campaign",
-             "--id", "c1",
+            ["campaign", "resume",
+             "--campaign", "c1",
              "--campaigns-root", str(camps_root),
              "--runs-root", str(runs_root),
              "--no-submit"],
@@ -1057,19 +1057,14 @@ class TestCampaignInstallCLI:
             )
         assert result.exit_code == 0, result.output
         assert "Installed" in result.output
-        dest = campaigns_root / "c1" / "algorithm" / "algorithm" / "run_tdvp.py"
-        # dest_rel preserves directory structure from source
-        dest_flat = campaigns_root / "c1" / "algorithm" / "run_tdvp.py"
-        # The file is at the path "algorithm/run_tdvp.py" inside algorithm dir.
-        dest_from_source = (
-            campaigns_root / "c1" / "algorithm" / "algorithm" / "run_tdvp.py"
-        )
-        # Check the lock has the managed entry.
+        # Default destination is the basename only — no subdirectory created.
+        dest = campaigns_root / "c1" / "algorithm" / "run_tdvp.py"
+        assert dest.exists()
         from intraknot.alg_lock import AlgorithmLock
         lock = AlgorithmLock.load(
             campaigns_root / "c1" / "algorithm" / "algorithm.lock"
         )
-        assert lock.is_managed("algorithm/run_tdvp.py")
+        assert lock.is_managed("run_tdvp.py")
 
     def test_install_with_custom_dest(self, tmp_path):
         campaigns_root, configs_dir = self._setup(tmp_path)
@@ -1128,6 +1123,102 @@ class TestCampaignInstallCLI:
              "--machine", str(configs_dir)],
         )
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# iknot campaign uninstall
+# ---------------------------------------------------------------------------
+
+class TestCampaignUninstallCLI:
+    def _setup(self, tmp_path: Path):
+        from intraknot.launch import create_campaign
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        create_campaign("c1", "", "dmrg", campaigns_root)
+        return campaigns_root
+
+    def test_uninstall_managed_deletes_file_and_deregisters(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        alg_dir = campaigns_root / "c1" / "algorithm"
+        assert (alg_dir / "run_dmrg.py").exists()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "uninstall", "run_dmrg.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Uninstalled" in result.output
+        assert not (alg_dir / "run_dmrg.py").exists()
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(alg_dir / "algorithm.lock")
+        assert not lock.is_managed("run_dmrg.py")
+
+    def test_uninstall_keep_file_preserves_file(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        alg_dir = campaigns_root / "c1" / "algorithm"
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "uninstall", "run_dmrg.py", "--keep-file",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Deregistered" in result.output
+        assert (alg_dir / "run_dmrg.py").exists()
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(alg_dir / "algorithm.lock")
+        assert not lock.is_managed("run_dmrg.py")
+
+    def test_uninstall_custom_entry(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        alg_dir = campaigns_root / "c1" / "algorithm"
+        script = alg_dir / "my_obs.py"
+        script.write_text("# custom\n")
+        from intraknot.alg_lock import AlgorithmLock
+        lock = AlgorithmLock.load(alg_dir / "algorithm.lock")
+        lock.add_custom("my_obs.py")
+        lock.save(alg_dir / "algorithm.lock")
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "uninstall", "my_obs.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert not script.exists()
+        lock2 = AlgorithmLock.load(alg_dir / "algorithm.lock")
+        assert not lock2.is_custom("my_obs.py")
+
+    def test_uninstall_untracked_exits_nonzero(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "uninstall", "nonexistent.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code != 0
+        assert "not tracked" in result.output
+
+    def test_uninstall_absent_file_succeeds_gracefully(self, tmp_path):
+        campaigns_root = self._setup(tmp_path)
+        alg_dir = campaigns_root / "c1" / "algorithm"
+        # Remove the file from disk but leave the lock entry.
+        (alg_dir / "run_dmrg.py").unlink()
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "uninstall", "run_dmrg.py",
+             "--campaign", "c1",
+             "--campaigns-root", str(campaigns_root)],
+        )
+        assert result.exit_code == 0, result.output
+        assert "already absent" in result.output
 
 
 # ---------------------------------------------------------------------------

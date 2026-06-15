@@ -19,7 +19,7 @@
 """Algorithm database registry for IntraKnot.
 
 A *database* is a collection of reusable algorithm scripts (observables,
-model definitions, colormaps, etc.) hosted in a git repository. Each
+model definitions, interaction maps, etc.) hosted in a git repository. Each
 database provides a `registry.yaml` at its root that catalogues every
 available script, organised by category.
 
@@ -142,7 +142,7 @@ def _raw_base_url(repo_url: str) -> str:
     """Derive the raw-file base URL from a GitHub repository URL.
 
     Converts `https://github.com/<owner>/<repo>` to
-    `https://raw.githubusercontent.com/<owner>/<repo>/main`.
+    `https://raw.githubusercontent.com/<owner>/<repo>/primary`.
 
     Parameters
     ----------
@@ -152,7 +152,7 @@ def _raw_base_url(repo_url: str) -> str:
     Returns
     -------
     str
-        Base URL for raw file access under the `main` branch.
+        Base URL for raw file access under the `primary` branch.
 
     Raises
     ------
@@ -166,7 +166,7 @@ def _raw_base_url(repo_url: str) -> str:
             "Expected format: https://github.com/<owner>/<repo>"
         )
     raw = url.replace("https://github.com/", "https://raw.githubusercontent.com/", 1)
-    return f"{raw}/main"
+    return f"{raw}/primary"
 
 
 def _registry_url(repo_url: str) -> str:
