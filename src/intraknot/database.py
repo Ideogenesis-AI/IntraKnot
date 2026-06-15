@@ -152,7 +152,7 @@ def _raw_base_url(repo_url: str) -> str:
     Returns
     -------
     str
-        Base URL for raw file access under the `main` branch.
+        Base URL for raw file access under the `primary` branch.
 
     Raises
     ------
