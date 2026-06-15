@@ -273,6 +273,48 @@ class TestAddCustom:
 
 
 # ---------------------------------------------------------------------------
+# AlgorithmLock — remove
+# ---------------------------------------------------------------------------
+
+class TestRemove:
+    def test_removes_managed_entry(self):
+        lock = AlgorithmLock()
+        lock.add_managed(make_managed_entry("run_dmrg.py", "src:f.py", "aa" * 32))
+        lock.remove("run_dmrg.py")
+        assert not lock.is_managed("run_dmrg.py")
+
+    def test_removes_custom_entry(self):
+        lock = AlgorithmLock()
+        lock.add_custom("my_obs.py")
+        lock.remove("my_obs.py")
+        assert not lock.is_custom("my_obs.py")
+
+    def test_raises_for_untracked_file(self):
+        lock = AlgorithmLock()
+        with pytest.raises(KeyError, match="not tracked"):
+            lock.remove("nonexistent.py")
+
+    def test_removed_entry_absent_from_saved_lock(self, tmp_path):
+        path = tmp_path / "algorithm.lock"
+        lock = AlgorithmLock()
+        lock.add_managed(make_managed_entry("spin_corr.py", "db:spin_corr.py", "aa" * 32))
+        lock.add_custom("my_obs.py")
+        lock.remove("spin_corr.py")
+        lock.save(path)
+        loaded = AlgorithmLock.load(path)
+        assert not loaded.is_managed("spin_corr.py")
+        assert loaded.is_custom("my_obs.py")
+
+    def test_other_entries_unaffected(self):
+        lock = AlgorithmLock()
+        lock.add_managed(make_managed_entry("a.py", "src:a.py", "aa" * 32))
+        lock.add_managed(make_managed_entry("b.py", "src:b.py", "bb" * 32))
+        lock.remove("a.py")
+        assert not lock.is_managed("a.py")
+        assert lock.is_managed("b.py")
+
+
+# ---------------------------------------------------------------------------
 # AlgorithmLock — check_modified
 # ---------------------------------------------------------------------------
 
