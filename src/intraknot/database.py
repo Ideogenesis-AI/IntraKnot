@@ -19,7 +19,7 @@
 """Algorithm database registry for IntraKnot.
 
 A *database* is a collection of reusable algorithm scripts (observables,
-model definitions, colormaps, etc.) hosted in a git repository. Each
+model definitions, interaction maps, etc.) hosted in a git repository. Each
 database provides a `registry.yaml` at its root that catalogues every
 available script, organised by category.
 
