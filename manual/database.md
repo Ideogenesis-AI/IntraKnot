@@ -1,6 +1,6 @@
 # `iknot database`
 
-An algorithm database is a GitHub repository that provides a curated collection of reusable algorithm scripts — observables, model definitions, colormaps, post-processing utilities, and similar components. Scripts are catalogued in a `registry.yaml` manifest at the repository root.
+An algorithm database is a GitHub repository that provides a curated collection of reusable algorithm scripts — observables, model definitions, interaction maps, post-processing utilities, and similar components. Scripts are catalogued in a `registry.yaml` manifest at the repository root.
 
 IntraKnot communicates with databases purely over HTTP. It fetches the `registry.yaml` manifest to discover available scripts, then fetches individual files on demand. No git cloning is performed.
 
