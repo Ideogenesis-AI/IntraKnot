@@ -433,8 +433,9 @@ def campaign_install(
     \b
         intraknot-database:observables/spin_corr.py
 
-    The file is fetched over HTTP and recorded as a managed entry in
-    algorithm.lock. Use --as to install under a different filename.
+    The file is fetched over HTTP and placed directly in algorithm/ using
+    only the basename of the source path. Use --as to install under a
+    different filename.
     """
     import urllib.error
 
@@ -464,8 +465,7 @@ def campaign_install(
     if dest_name:
         dest_rel = dest_name
     else:
-        # Preserve the subdirectory structure from the source path.
-        dest_rel = file_path
+        dest_rel = Path(file_path).name
 
     alg_dir = campaign_dir / "algorithm"
     dest_path = alg_dir / dest_rel
@@ -988,9 +988,11 @@ def database_list(machine_opt: Optional[str]) -> None:
         if entry.categories:
             for cat_name, cat in sorted(entry.categories.items()):
                 n = len(cat.scripts)
-                click.echo(f"  {cat_name} ({n} script{'s' if n != 1 else ''})")
+                click.echo(f"\n  {cat_name} ({n} script{'s' if n != 1 else ''})")
+                col = max((len(Path(s.file).name) for s in cat.scripts), default=0) + 2
                 for script in cat.scripts:
-                    click.echo(f"    {script.file:<45} {script.description}")
+                    basename = Path(script.file).name
+                    click.echo(f"    {basename:<{col}} {script.description}")
         else:
             click.echo("  (registry not yet fetched — run `iknot database update`)")
 
