@@ -142,7 +142,7 @@ def _raw_base_url(repo_url: str) -> str:
     """Derive the raw-file base URL from a GitHub repository URL.
 
     Converts `https://github.com/<owner>/<repo>` to
-    `https://raw.githubusercontent.com/<owner>/<repo>/main`.
+    `https://raw.githubusercontent.com/<owner>/<repo>/primary`.
 
     Parameters
     ----------
@@ -166,7 +166,7 @@ def _raw_base_url(repo_url: str) -> str:
             "Expected format: https://github.com/<owner>/<repo>"
         )
     raw = url.replace("https://github.com/", "https://raw.githubusercontent.com/", 1)
-    return f"{raw}/main"
+    return f"{raw}/primary"
 
 
 def _registry_url(repo_url: str) -> str:
