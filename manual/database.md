@@ -101,10 +101,11 @@ intraknot-database
   URL         : https://github.com/Ideogenesis-AI/IntraKnot-Database
   Last fetched: 2026-06-11
   Description : Community algorithm scripts for IntraKnot
+
   observables (3 scripts)
-    observables/spin_corr.py      Spin-spin correlation function
-    observables/entanglement.py   Entanglement entropy profile
-    observables/current.py        Bond current observable
+    spin_corr.py      Spin-spin correlation function
+    entanglement.py   Entanglement entropy profile
+    current.py        Bond current observable
 ```
 
 ---
