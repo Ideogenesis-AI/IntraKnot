@@ -49,11 +49,11 @@ from intraknot.database import (
 class TestRawBaseUrl:
     def test_converts_github_url(self):
         url = _raw_base_url("https://github.com/Ideogenesis-AI/intraknot-database")
-        assert url == "https://raw.githubusercontent.com/Ideogenesis-AI/intraknot-database/main"
+        assert url == "https://raw.githubusercontent.com/Ideogenesis-AI/intraknot-database/primary"
 
     def test_strips_trailing_slash(self):
         url = _raw_base_url("https://github.com/foo/bar/")
-        assert url == "https://raw.githubusercontent.com/foo/bar/main"
+        assert url == "https://raw.githubusercontent.com/foo/bar/primary"
 
     def test_rejects_non_github_url(self):
         with pytest.raises(ValueError, match="GitHub"):
@@ -70,11 +70,11 @@ class TestRegistryUrl:
 class TestFileUrl:
     def test_constructs_file_url(self):
         url = _file_url("https://github.com/foo/bar", "observables/spin_corr.py")
-        assert url == "https://raw.githubusercontent.com/foo/bar/main/observables/spin_corr.py"
+        assert url == "https://raw.githubusercontent.com/foo/bar/primary/observables/spin_corr.py"
 
     def test_strips_leading_slash_from_path(self):
         url = _file_url("https://github.com/foo/bar", "/observables/spin_corr.py")
-        assert url == "https://raw.githubusercontent.com/foo/bar/main/observables/spin_corr.py"
+        assert url == "https://raw.githubusercontent.com/foo/bar/primary/observables/spin_corr.py"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +119,7 @@ _REGISTRY_YAML = """\
 databases:
   test-db:
     url: https://github.com/foo/test-db
-    registry_url: https://raw.githubusercontent.com/foo/test-db/main/registry.yaml
+    registry_url: https://raw.githubusercontent.com/foo/test-db/primary/registry.yaml
     fetched_at: "2026-01-15"
     description: Test database
     categories:
@@ -184,7 +184,7 @@ class TestDatabaseRegistrySave:
         reg.entries["test-db"] = DatabaseEntry(
             name="test-db",
             url="https://github.com/foo/test-db",
-            registry_url="https://raw.githubusercontent.com/foo/test-db/main/registry.yaml",
+            registry_url="https://raw.githubusercontent.com/foo/test-db/primary/registry.yaml",
             fetched_at="2026-01-15",
             description="Test DB",
             categories={
@@ -341,7 +341,7 @@ class TestResolveFile:
         reg.entries["test-db"] = DatabaseEntry(
             name="test-db",
             url="https://github.com/foo/test-db",
-            registry_url="https://raw.githubusercontent.com/foo/test-db/main/registry.yaml",
+            registry_url="https://raw.githubusercontent.com/foo/test-db/primary/registry.yaml",
             fetched_at="2026-01-15",
         )
         with patch("intraknot.database._fetch_bytes", return_value=content):
