@@ -146,6 +146,30 @@ Once installed, `iknot campaign sync` will track the file and notify you of upst
 
 ---
 
+### `iknot campaign uninstall <FILENAME>`
+
+Remove a script from the campaign's `algorithm/` directory and deregister it from `algorithm.lock`.
+
+#### Synopsis
+
+```
+iknot campaign uninstall [OPTIONS] FILENAME
+```
+
+`FILENAME` is the script's filename inside `algorithm/`, e.g. `intrcmap_bfg.py`. It must be tracked in `algorithm.lock` (either managed or custom).
+
+#### Options
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--keep-file` | off | Deregister from `algorithm.lock` without deleting the file from disk. |
+| `--campaign TEXT` | active campaign | Campaign to modify. |
+| `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
+
+By default, the file is removed from disk and deregistered from `algorithm.lock`. Pass `--keep-file` to only remove the lock entry, leaving the file on disk as an untracked script.
+
+---
+
 ### `iknot campaign sync [FILE ...]`
 
 Synchronise managed algorithm scripts from their sources.
