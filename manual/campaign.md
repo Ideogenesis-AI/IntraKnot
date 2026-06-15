@@ -131,7 +131,7 @@ intraknot-database:observables/spin_corr.py
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--as FILENAME` | (same as source path) | Destination filename inside `algorithm/`. Relative subdirectory structure from the source path is preserved by default. |
+| `--as FILENAME` | (basename of source path) | Destination filename inside `algorithm/`. Only the basename of the source path is used by default; subdirectory structure is not preserved. |
 | `--campaign TEXT` | active campaign | Campaign to install into. |
 | `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories. |
 | `--machine PATH` | `./configs` | Path to the `configs/` directory (for `registry.yaml`). |
