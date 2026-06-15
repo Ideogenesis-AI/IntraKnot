@@ -525,6 +525,66 @@ def campaign_install(
     click.echo(f"Installed {dest_rel} from {source}.")
 
 
+@grp_campaign.command("uninstall")
+@click.argument("filename")
+@click.option("--keep-file", is_flag=True, default=False,
+              help="Remove from algorithm.lock but leave the file on disk.")
+@click.option("--campaign", "campaign_id", default=None,
+              help="Campaign ID. Defaults to the active campaign.")
+@click.option("--campaigns-root", default="campaigns", show_default=True)
+def campaign_uninstall(
+    filename: str,
+    keep_file: bool,
+    campaign_id: Optional[str],
+    campaigns_root: str,
+) -> None:
+    """Remove a script from the campaign's algorithm/ directory.
+
+    FILENAME is the script's filename inside algorithm/ (e.g.
+    intrcmap_bfg.py). The file is deleted from disk and deregistered from
+    algorithm.lock. Pass --keep-file to deregister without deleting.
+    """
+    if campaign_id is None:
+        campaign_id, _ = _resolve_active_campaign()
+    if campaign_id is None:
+        click.echo(
+            "Error: no campaign specified. "
+            "Use --campaign or `iknot campaign activate <id>`.",
+            err=True,
+        )
+        sys.exit(1)
+
+    campaign_dir = Path(campaigns_root) / campaign_id
+    if not campaign_dir.exists():
+        click.echo(f"Error: campaign directory not found: {campaign_dir}", err=True)
+        sys.exit(1)
+
+    alg_dir = campaign_dir / "algorithm"
+    lock_path = alg_dir / "algorithm.lock"
+    lock = AlgorithmLock.load(lock_path)
+
+    try:
+        lock.remove(filename)
+    except KeyError:
+        click.echo(
+            f"Error: {filename!r} is not tracked in algorithm.lock.",
+            err=True,
+        )
+        sys.exit(1)
+
+    lock.save(lock_path)
+
+    if not keep_file:
+        file_path = alg_dir / filename
+        if file_path.exists():
+            file_path.unlink()
+            click.echo(f"Uninstalled {filename}.")
+        else:
+            click.echo(f"Deregistered {filename} (file was already absent).")
+    else:
+        click.echo(f"Deregistered {filename} from algorithm.lock (file kept).")
+
+
 @grp_campaign.command("sync")
 @click.argument("files", nargs=-1, metavar="[FILE ...]")
 @click.option("--force", is_flag=True, default=False,
