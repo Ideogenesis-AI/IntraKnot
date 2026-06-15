@@ -227,6 +227,32 @@ class AlgorithmLock:
         if filename not in self.custom:
             self.custom.append(filename)
 
+    def remove(self, filename: str) -> None:
+        """Remove a file from the lock entirely.
+
+        Removes `filename` from whichever list it appears in — `managed`
+        or `custom`. Raises `KeyError` when the file is not tracked at all.
+        The on-disk file is not touched.
+
+        Parameters
+        ----------
+        filename:
+            Relative path inside `algorithm/` to deregister.
+
+        Raises
+        ------
+        KeyError
+            If `filename` is neither a managed nor a custom entry.
+        """
+        if filename in self.managed:
+            del self.managed[filename]
+        elif filename in self.custom:
+            self.custom.remove(filename)
+        else:
+            raise KeyError(
+                f"{filename!r} is not tracked in algorithm.lock"
+            )
+
     # ------------------------------------------------------------------
     # Inspection helpers
     # ------------------------------------------------------------------
