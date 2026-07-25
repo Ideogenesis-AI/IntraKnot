@@ -673,6 +673,130 @@ class TestRunExecCLI:
 
 
 # ---------------------------------------------------------------------------
+# iknot run exec --delete
+# ---------------------------------------------------------------------------
+
+class TestRunExecDeleteCLI:
+    def _setup(self, tmp_path, promote: bool = True):
+        """Build a run with an exec slot and (optionally) a promoted script."""
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        _make_slurm_toml(runs_root / "r1")
+
+        exec_script = camps_root / "c1" / "algorithm" / "my_exec.py"
+        exec_script.parent.mkdir(parents=True, exist_ok=True)
+        exec_script.write_text("# exec script\n")
+
+        exec_slot = runs_root / "r1" / "exec" / "my_exec"
+        (exec_slot / "logs").mkdir(parents=True, exist_ok=True)
+        (exec_slot / "submit.slurm").write_text("#!/bin/sh\n")
+        (exec_slot / "status.json").write_text("{}")
+
+        promoted = runs_root / "r1" / "algorithm" / "my_exec.py"
+        if promote:
+            promoted.parent.mkdir(parents=True, exist_ok=True)
+            promoted.write_text("# promoted exec script\n")
+
+        return camps_root, runs_root, runner, exec_slot, promoted
+
+    def test_delete_removes_slot_and_promoted_script(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not exec_slot.exists()
+        assert not promoted.exists()
+        assert "Deleted exec slot" in result.output
+        assert "Deleted promoted script" in result.output
+
+    def test_delete_without_promoted_script_removes_slot_only(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(
+            tmp_path, promote=False
+        )
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not exec_slot.exists()
+        assert "Deleted exec slot" in result.output
+        assert "Deleted promoted script" not in result.output
+
+    def test_delete_prompts_without_yes(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(tmp_path)
+        # Decline the confirmation prompt.
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        assert exec_slot.exists()
+        assert promoted.exists()
+
+    def test_delete_nothing_to_delete_is_a_noop(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        result = runner.invoke(
+            main,
+            ["run", "exec", "never_ran", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" in result.output
+
+    def test_delete_missing_run_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "nonexistent",
+             "--runs-root", str(tmp_path / "runs"),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code != 0
+
+    @pytest.mark.parametrize("conflicting_flag", [["--local"], ["--attempt", "attempt_01"]])
+    def test_delete_rejects_incompatible_flags(self, tmp_path, conflicting_flag):
+        camps_root, runs_root, runner, _, _ = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"] + conflicting_flag,
+        )
+        assert result.exit_code != 0
+        assert "--delete cannot be combined" in result.output
+
+
+# ---------------------------------------------------------------------------
 # iknot resume run / campaign
 # ---------------------------------------------------------------------------
 
