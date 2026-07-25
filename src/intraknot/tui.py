@@ -38,6 +38,8 @@ Key bindings
 - `r` — refresh all run data from disk.
 - `l` — suspend TUI, open alice.log for the selected run in the configured
   editor, then resume.
+- `y` — copy the selected run's run_id to the clipboard (via OSC 52; requires
+  a terminal that supports it, e.g. iTerm2, Kitty, WezTerm, Windows Terminal).
 - `← →` — page through the run list (6 rows per page).
 - `↑ ↓` — move the row cursor (DataTable handles these natively).
 - `q` — quit.
@@ -568,9 +570,11 @@ class DashboardApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("v", "view_file", "View"),
         # l and a remain as direct shortcuts but are hidden from the footer;
-        # the v overlay covers the same files and more.
+        # the v overlay covers the same files and more. y is likewise hidden
+        # to keep the footer compact.
         Binding("l", "open_iknot_log", show=False),
         Binding("a", "open_alice_log", show=False),
+        Binding("y", "copy_run_id", show=False),
         # [ and ] are the clickable footer entries; key_display makes them
         # render as ← → so the UI stays intuitive.  The hidden priority
         # bindings on the actual arrow keys let users press ← → on the
@@ -777,6 +781,22 @@ class DashboardApp(App):
         # the editor subprocess and resumes the TUI when the editor exits.
         with self.suspend():
             subprocess.run([self._editor, str(log_path)], check=False)
+
+    def action_copy_run_id(self) -> None:
+        """Copy the selected run's run_id to the clipboard via OSC 52.
+
+        OSC 52 is relayed by the terminal emulator, so this only reaches the
+        clipboard when the terminal in use supports it (most do, notably
+        excluding macOS Terminal.app). This is the mechanism that also works
+        when `iknot tui` is run over SSH, since the escape sequence is
+        forwarded to the local terminal on the client side.
+        """
+        run = self._selected_run()
+        if run is None:
+            self.notify("No run selected.", severity="warning")
+            return
+        self.copy_to_clipboard(run.run_id)
+        self.notify(f"Copied {run.run_id}")
 
     def action_view_file(self) -> None:
         """Open the file viewer overlay for the selected run."""
