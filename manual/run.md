@@ -306,6 +306,8 @@ iknot run exec [OPTIONS] SCRIPT_NAME RUN_ID
 | `--machine PATH` | `./configs` | Path to the `configs/` directory. |
 | `--local` | off | Run with `sh` instead of submitting to Slurm. |
 | `--attempt TEXT` | none | Pin the exec script to a specific attempt (e.g. `attempt_01`). Only effective with `--local`; passed to the script as the `IKNOT_ATTEMPT` environment variable. |
+| `--delete` | off | Delete the exec slot and the promoted script instead of running anything. See [Deleting an exec job](#deleting-an-exec-job). |
+| `--yes`, `-y` | off | Skip the confirmation prompt when `--delete` is given. |
 
 #### Script search path
 
@@ -317,6 +319,8 @@ iknot run exec [OPTIONS] SCRIPT_NAME RUN_ID
 
 The script is copied into `runs/<RUN_ID>/algorithm/` and a Slurm script is written to `runs/<RUN_ID>/exec/<SCRIPT_NAME>/submit.slurm` using the `[exec]` section of the run's `slurm.toml`. The exec job is then submitted via `sbatch`, or run locally with `--local`.
 
+**Promotion only happens once.** The copy into `runs/<RUN_ID>/algorithm/` is skipped if that file already exists, and the search path checks the run directory *before* the campaign directory. This means that once a script has been promoted to a run, editing the campaign-level (or package) copy has no effect on that run — `iknot run exec` keeps using the stale run-level copy. Either edit `runs/<RUN_ID>/algorithm/<SCRIPT_NAME>.py` directly, or delete it first (see below) so it gets re-promoted from the campaign.
+
 #### Output layout
 
 ```
@@ -325,6 +329,18 @@ runs/<RUN_ID>/exec/<SCRIPT_NAME>/
 ├── logs/               # Slurm output and error logs
 └── status.json         # written by the script on completion
 ```
+
+#### Deleting an exec job
+
+```
+iknot run exec <SCRIPT_NAME> <RUN_ID> --delete [--yes]
+```
+
+Removes `runs/<RUN_ID>/exec/<SCRIPT_NAME>/` (including `logs/`, `status.json`, and `job_id.txt`) and the promoted script `runs/<RUN_ID>/algorithm/<SCRIPT_NAME>.py`. This is the way to un-stick a run-level override: after deleting, the next `iknot run exec <SCRIPT_NAME> <RUN_ID>` re-promotes the script from the campaign (or package).
+
+- Prompts for confirmation unless `--yes` is given.
+- `--delete` cannot be combined with `--local` or `--attempt`.
+- If neither the exec slot nor the promoted script exists, the command is a no-op (prints "Nothing to delete" and exits 0).
 
 ---
 
