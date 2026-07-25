@@ -1420,6 +1420,11 @@ def run_submit(
 @click.option("--attempt", default=None,
               help="Pin the exec script to a specific attempt "
                    "(e.g. attempt_01). Passed as --attempt to the script.")
+@click.option("--delete", is_flag=True, default=False,
+              help="Delete the exec slot (exec/<script_name>/) and the promoted "
+                   "script (algorithm/<script_name>.py) instead of running it.")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Skip the confirmation prompt when --delete is given.")
 def run_exec(
     script_name: str,
     run_id: str,
@@ -1429,6 +1434,8 @@ def run_exec(
     machine_opt: Optional[str],
     local: bool,
     attempt: Optional[str],
+    delete: bool,
+    yes: bool,
 ) -> None:
     """Run an exec (follow-up) script in the context of a run.
 
@@ -1443,13 +1450,46 @@ def run_exec(
     A Slurm script is written to exec/<script_name>/submit.slurm using the
     [exec] section of the run's slurm.toml, then submitted via sbatch (or
     run directly with --local).
+
+    With --delete, removes the exec slot (exec/<script_name>/, including logs
+    and status.json) and the promoted script (algorithm/<script_name>.py)
+    instead of running anything. This also un-sticks a run-level override so
+    that a subsequent `iknot run exec` re-promotes the script from the
+    campaign (or package).
     """
-    machine = _load_machine(machine_opt)
+    if delete and (local or attempt):
+        click.echo("Error: --delete cannot be combined with --local or --attempt.", err=True)
+        sys.exit(1)
 
     run_dir = Path(runs_root) / run_id
     if not run_dir.exists():
         click.echo(f"Error: run directory not found: {run_dir}", err=True)
         sys.exit(1)
+
+    if delete:
+        exec_slot = run_dir / "exec" / script_name
+        script_path = run_dir / "algorithm" / f"{script_name}.py"
+
+        if not exec_slot.exists() and not script_path.exists():
+            click.echo(f"Nothing to delete for exec script '{script_name}'.")
+            return
+
+        if not yes:
+            click.confirm(
+                f"Delete exec slot '{exec_slot}' and promoted script "
+                f"'{script_path}'? This cannot be undone.",
+                abort=True,
+            )
+
+        if exec_slot.exists():
+            shutil.rmtree(exec_slot)
+            click.echo(f"Deleted exec slot: {exec_slot}")
+        if script_path.exists():
+            script_path.unlink()
+            click.echo(f"Deleted promoted script: {script_path}")
+        return
+
+    machine = _load_machine(machine_opt)
 
     # Resolve campaign directory.
     campaign_dir = _resolve_campaign_dir(run_dir, campaign_id, campaigns_root)
