@@ -77,12 +77,12 @@ def _mock_summary(*, converged: bool = True, n_steps: int = 2) -> MagicMock:
     Parameters
     ----------
     converged:
-        Value for `summary.converged`.
+        Value for `summary.finished`.
     n_steps:
         Number of squaring steps; thermodynamic series have length `n_steps + 1`.
     """
     s = MagicMock()
-    s.converged = converged
+    s.finished = converged
     s.n_steps = n_steps
     s.betas = [0.001 * 2 ** i for i in range(n_steps + 1)]
     s.log_z = [1.0 - 0.1 * i for i in range(n_steps + 1)]
