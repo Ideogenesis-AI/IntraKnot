@@ -18,6 +18,7 @@
 
 """Tests for src/intraknot/cli.py — CLI commands and helper functions."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -294,6 +295,46 @@ class TestCmdStatus:
         )
         assert result.exit_code == 0
         assert "No status found" in result.output
+
+    def test_shows_energy_and_converged_from_current_attempt(self, tmp_path):
+        """Energy/Converged are read from the current attempt's info.json.
+
+        There is no `summary/` collection step (removed by design), so this
+        is the only source for these fields.
+        """
+        runs_root = tmp_path / "runs"
+        run_dir = self._write_main_status(
+            runs_root, "r4",
+            current_attempt="attempt_01",
+            reason=FailureReason.CONVERGED,
+        )
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "info.json").write_text(
+            json.dumps({"energy": -12.3814899971, "converged": True})
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r4", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Energy          : -12.3814899971" in result.output
+        assert "Converged       : True" in result.output
+
+    def test_no_energy_line_when_attempt_info_missing(self, tmp_path):
+        """No current attempt directory (or missing info.json) is not an error."""
+        runs_root = tmp_path / "runs"
+        self._write_main_status(
+            runs_root, "r5",
+            current_attempt="attempt_01",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r5", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Energy" not in result.output
+        assert "Converged" not in result.output
 
 
 # ---------------------------------------------------------------------------
