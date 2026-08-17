@@ -89,9 +89,9 @@ Files are listed in the following order:
 | `run_id` | `runs.csv` | Truncated if long. |
 | `scan` | `runs.csv` | Scan identifier; `—` if not part of a scan. |
 | `state` | `main/status.json` | Color-coded with a state icon: ○ pending, ● running, ✓ done, ✗ failed. |
-| `conv` | `summary/info.json` | Convergence flag (`yes` / `no` / `—`). |
-| `sweeps` | `summary/info.json` | Number of DMRG sweeps completed. |
-| `bond` | `summary/info.json` | Peak bond dimension reached. |
+| `conv` | `main/current/info.json` | Convergence flag (`yes` / `no` / `—`). |
+| `sweeps` | `main/current/info.json` | Number of DMRG sweeps completed. |
+| `bond` | `main/current/info.json` | Peak bond dimension reached. |
 
 ### Detail pane
 
