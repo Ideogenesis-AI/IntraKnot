@@ -1660,19 +1660,20 @@ def cmd_status(run_id: str, runs_root: str) -> None:
         click.echo(f"Restartable     : {s.restartable}")
         click.echo(f"Hostname        : {s.hostname or '—'}")
 
-        # Also show summary observables if available.
-        obs_path = run_dir / "summary" / "info.json"
-        if obs_path.exists():
-            try:
-                obs = json.loads(obs_path.read_text())
-                energy = obs.get("energy")
-                converged = obs.get("converged")
-                if energy is not None:
-                    click.echo(f"Energy          : {energy:.10f}")
-                if converged is not None:
-                    click.echo(f"Converged       : {converged}")
-            except (json.JSONDecodeError, OSError):
-                pass
+        # Show observables from the current attempt, if one is recorded.
+        if s.current_attempt:
+            info_path = run_dir / "main" / "attempts" / s.current_attempt / "info.json"
+            if info_path.exists():
+                try:
+                    info = json.loads(info_path.read_text())
+                    energy = info.get("energy")
+                    converged = info.get("converged")
+                    if energy is not None:
+                        click.echo(f"Energy          : {energy:.10f}")
+                    if converged is not None:
+                        click.echo(f"Converged       : {converged}")
+                except (json.JSONDecodeError, OSError):
+                    pass
 
         # Summarise exec jobs if exec/ directory exists.
         exec_dir = run_dir / "exec"
