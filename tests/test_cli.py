@@ -465,6 +465,42 @@ class TestCampaignCommands:
         assert result.exit_code == 0, result.output
         assert (tmp_path / "campaigns" / "my_campaign").is_dir()
 
+    def test_campaign_create_algorithm_seeds_defaults(self, tmp_path):
+        """--algorithm picks the [algorithm] block written to defaults.toml."""
+        runner = CliRunner()
+        camps_root = tmp_path / "campaigns"
+        result = runner.invoke(
+            main,
+            ["campaign", "create", "xtrg_campaign",
+             "--algorithm", "xtrg",
+             "--campaigns-root", str(camps_root)],
+        )
+        assert result.exit_code == 0, result.output
+        defaults = (camps_root / "xtrg_campaign" / "defaults.toml").read_text()
+        assert 'engine        = "xtrg"' in defaults
+        assert "n_steps" in defaults
+
+    def test_campaign_create_copies_all_runners(self, tmp_path):
+        runner = CliRunner()
+        camps_root = tmp_path / "campaigns"
+        runner.invoke(
+            main,
+            ["campaign", "create", "c1", "--campaigns-root", str(camps_root)],
+        )
+        alg_dir = camps_root / "c1" / "algorithm"
+        assert (alg_dir / "run_dmrg.py").exists()
+        assert (alg_dir / "run_xtrg.py").exists()
+
+    def test_campaign_create_unknown_algorithm_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "create", "bad",
+             "--algorithm", "nonexistent",
+             "--campaigns-root", str(tmp_path / "campaigns")],
+        )
+        assert result.exit_code != 0
+
     def test_campaign_create_duplicate_exits_nonzero(self, tmp_path):
         runner = CliRunner()
         args = ["campaign", "create", "dup",
