@@ -42,7 +42,7 @@ iknot campaign create [OPTIONS] CAMPAIGN_ID
 | Option                  | Default     | Description                                           |
 | ----------------------- | ----------- | ----------------------------------------------------- |
 | `--description TEXT`    | `""`        | Human-readable description stored in `campaign.yaml`. |
-| `--algorithm TEXT`      | `dmrg`      | Algorithm runner script to copy into `algorithm/`.    |
+| `--algorithm TEXT`      | `dmrg`      | Engine whose defaults seed `defaults.toml`.           |
 | `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories.         |
 | `--machine PATH`        | `./configs` | Path to the `configs/` directory.                     |
 
@@ -59,8 +59,11 @@ campaigns/<CAMPAIGN_ID>/
 ├── logs/               # Slurm array job log files
 └── algorithm/
     ├── algorithm.lock  # provenance tracking for all scripts in this directory
-    └── run_dmrg.py     # algorithm runner script (or the one named by --algorithm)
+    ├── run_dmrg.py     # every bundled runner is copied, regardless of --algorithm
+    └── run_xtrg.py
 ```
+
+All bundled runners are installed because each run picks its engine through `[algorithm] engine` in its own `config.toml`; `--algorithm` only decides which engine's parameter block seeds `defaults.toml`. A campaign can therefore hold DMRG and XTRG runs side by side.
 
 `**defaults.toml**` is the campaign's baseline scientific configuration. It is an Alice-compatible TOML file with up to four sections: `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. When a run is created with `iknot run create`, the campaign's `defaults.toml` is merged with any per-run overrides to produce the run's `config.toml`. Edit `defaults.toml` after creating the campaign and before creating any runs to set the shared parameters for the whole parameter study.
 
@@ -262,6 +265,7 @@ campaigns/<CAMPAIGN_ID>/
 └── algorithm/
     ├── algorithm.lock      # provenance tracking file
     ├── run_dmrg.py         # managed entry (installed from intraknot package)
+    ├── run_xtrg.py         # managed entry (installed from intraknot package)
     └── my_obs.py           # custom entry (user-authored)
 ```
 
