@@ -144,6 +144,10 @@ class _NonFiniteValue(RuntimeError):
     """Raised when XTRG returns a NaN or infinite scalar observable."""
 
 
+class _EngineMismatch(ValueError):
+    """Raised when `config.toml` selects an engine other than XTRG."""
+
+
 # ---------------------------------------------------------------------------
 # Attempt directory resolution
 # ---------------------------------------------------------------------------
@@ -210,6 +214,10 @@ def _update_current(run_dir: Path, attempt_name: str) -> None:
 def _validate_config(cfg_algo: Dict[str, Any]) -> None:
     """Reject orchestration settings inconsistent with this runner.
 
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    a mismatch here means the wrong runner was dispatched. Failing fast is
+    safer than silently running a different algorithm.
+
     Parameters
     ----------
     cfg_algo:
@@ -217,12 +225,12 @@ def _validate_config(cfg_algo: Dict[str, Any]) -> None:
 
     Raises
     ------
-    ValueError
+    _EngineMismatch
         If `engine` is set to anything other than `"xtrg"`.
     """
     engine = str(cfg_algo.get("engine", "xtrg")).lower()
     if engine != "xtrg":
-        raise ValueError(
+        raise _EngineMismatch(
             f"run_xtrg.py requires algorithm.engine='xtrg', got {engine!r}"
         )
 
@@ -553,6 +561,11 @@ def run(run_dir: Path) -> None:
             end_reason = FailureReason.NOT_CONVERGED
             restartable = True
 
+    except _EngineMismatch:
+        logger.exception("Engine mismatch: wrong runner dispatched")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
     except _NonFiniteValue:
         logger.exception("Non-finite XTRG observable")
         end_reason = FailureReason.NAN_DETECTED
