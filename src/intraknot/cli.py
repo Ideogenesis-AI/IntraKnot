@@ -357,7 +357,7 @@ def grp_campaign() -> None:
 @click.argument("campaign_id")
 @click.option("--description", default="", help="Human-readable description.")
 @click.option("--algorithm", default="dmrg", show_default=True,
-              help="Algorithm runner to copy into the campaign.")
+              help="Engine whose defaults seed defaults.toml.")
 @click.option("--campaigns-root", default="campaigns", show_default=True,
               help="Parent directory for campaign subdirectories.")
 @click.option("--machine", "machine_opt", default=None,
@@ -377,7 +377,7 @@ def campaign_create(
             campaign_id, description, algorithm, root, configs_dir=configs_dir
         )
         click.echo(f"Created campaign: {campaign_dir}")
-    except FileExistsError as e:
+    except (FileExistsError, ValueError) as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
