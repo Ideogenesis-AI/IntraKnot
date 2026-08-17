@@ -220,6 +220,64 @@ class TestFindLatestCheckpoint:
 
 
 # ---------------------------------------------------------------------------
+# _validate_config
+# ---------------------------------------------------------------------------
+
+class TestValidateConfig:
+    """Tests for `_validate_config`.
+
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    this runner must refuse a config that selects a different engine.
+    """
+
+    def test_accepts_dmrg_engine(self):
+        from intraknot.algorithm.run_dmrg import _validate_config
+        _validate_config({"engine": "dmrg"})
+
+    def test_defaults_to_dmrg(self):
+        from intraknot.algorithm.run_dmrg import _validate_config
+        _validate_config({})
+
+    def test_rejects_other_engine(self):
+        from intraknot.algorithm.run_dmrg import _EngineMismatch, _validate_config
+        with pytest.raises(_EngineMismatch, match="engine"):
+            _validate_config({"engine": "xtrg"})
+
+    def test_run_marks_engine_mismatch_invalid(self, tmp_path):
+        """A mis-dispatched run must not be retried with the same config."""
+        from intraknot.algorithm import run_dmrg
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir, extra='engine = "xtrg"\n')
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        calls: list = []
+
+        with (
+            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction",
+                         return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status",
+                         side_effect=lambda p, s: calls.append((p, s))),
+        ):
+            ml.INFO = 20
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
+
+        mock_dmrg_mod.run.assert_not_called()
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
+
+
+# ---------------------------------------------------------------------------
 # _write_observables
 # ---------------------------------------------------------------------------
 
@@ -780,6 +838,116 @@ class TestRunOutputFiles:
             run_dmrg.run(run_dir)
 
         mock_summary.save.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# run() — exception mapping
+# ---------------------------------------------------------------------------
+
+class TestRunExceptionMapping:
+    """run() maps Alice/config failures onto IntraKnot status reasons.
+
+    A deterministic configuration error must not be reported as a restartable
+    failure, or `iknot run resume` would relaunch a run that cannot succeed.
+    """
+
+    def _run_with_side_effect(self, run_dir: Path, exc: BaseException):
+        from intraknot.algorithm import run_dmrg
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        calls: list = []
+
+        with (
+            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction",
+                         return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "load_space", return_value=(MagicMock(), {})),
+            patch.object(run_dmrg, "init_mps", return_value=MagicMock()),
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status",
+                         side_effect=lambda p, s: calls.append((p, s))),
+        ):
+            ml.INFO = 20
+            mock_opts = MagicMock()
+            mock_opts.n_sweeps = 2
+            mock_dmrg_mod.Options.from_toml.return_value = mock_opts
+            mock_dmrg_mod.run.side_effect = exc
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
+
+        return calls
+
+    def test_value_error_sets_invalid(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, ValueError("bad target_qn"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
+
+    def test_missing_checkpoint_is_not_restartable(self, tmp_path):
+        """`init = "ckpt"` with an absent file cannot be fixed by retrying."""
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(
+            run_dir, FileNotFoundError("initial.ckpt")
+        )
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
+
+    def test_runtime_error_sets_linear_algebra(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, RuntimeError("lanczos failed"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.LINEAR_ALGEBRA_ERROR
+        assert main_calls[-1][1].restartable is False
+
+    def test_memory_error_is_restartable(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, MemoryError())
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.OUT_OF_MEMORY
+        assert main_calls[-1][1].restartable is True
+
+    def test_unknown_exception_stays_restartable(self, tmp_path):
+        """An unrecognized failure may be transient, so retrying is allowed."""
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, OSError("node lost"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.SCHEDULER_FAILURE
+        assert main_calls[-1][1].restartable is True
 
 
 # ---------------------------------------------------------------------------
