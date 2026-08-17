@@ -555,6 +555,8 @@ class TestSlurmJobConfigGres:
         from helpers import make_machine
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
+        (run_dir / "algorithm").mkdir()
+        (run_dir / "algorithm" / "run_dmrg.py").write_text("# stub\n")
         p = run_dir / "slurm.toml"
         p.write_text(
             '[basic]\n'
