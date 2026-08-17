@@ -107,11 +107,10 @@ runs/<RUN_ID>/
 ├── algorithm/
 │   ├── run_dmrg.py         # runner scripts (copied from campaign)
 │   └── run_xtrg.py         # the one matching [algorithm] engine is executed
-├── main/
-│   ├── status.json         # initial state: {"state": "pending", ...}
-│   ├── attempts/           # one subdirectory per execution attempt
-│   └── logs/               # Slurm output and error logs
-└── summary/                # optional; may contain observables snapshots
+└── main/
+    ├── status.json         # initial state: {"state": "pending", ...}
+    ├── attempts/           # one subdirectory per execution attempt
+    └── logs/               # Slurm output and error logs
 ```
 
 **`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`, `[plugin]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
