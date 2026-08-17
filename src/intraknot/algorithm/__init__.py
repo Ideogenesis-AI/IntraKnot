@@ -21,10 +21,13 @@
 This subpackage contains standalone runner scripts that are copied into
 campaign and run directories and executed directly by Slurm. Each runner
 reads `config.toml` from the run directory, runs the algorithm, and writes
-outputs (`state.ckpt`, `info.json`, `conv.csv`, `status.json`).
+outputs (`info.json`, `status.json`, plus algorithm-specific tables and
+checkpoints).
 
 Available runners
 -----------------
 run_dmrg
     DMRG ground-state search using Alice.
+run_xtrg
+    XTRG finite-temperature cooling using Alice.
 """
