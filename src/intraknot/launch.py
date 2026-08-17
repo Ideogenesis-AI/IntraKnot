@@ -880,7 +880,6 @@ def create_run(
     run_dir.mkdir(parents=True)
     (run_dir / "main" / "attempts").mkdir(parents=True)
     (run_dir / "main" / "logs").mkdir(parents=True)
-    (run_dir / "summary").mkdir()
 
     # Write merged config.toml (source of truth for this run's science).
     (run_dir / "config.toml").write_text(_dump_toml(merged_cfg))
