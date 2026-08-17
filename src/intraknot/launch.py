@@ -105,6 +105,48 @@ def _dump_toml(data: dict, _prefix: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Engine resolution
+# ---------------------------------------------------------------------------
+
+#: Shell snippet that reads `[algorithm] engine` from a run's config.toml.
+#: Array jobs span runs that may use different engines, so the runner cannot
+#: be baked into the script at render time. `python_cmd` is typically a
+#: wrapper such as `uv run`, which cannot take a `-c` one-liner, so the
+#: generated TOML is parsed with awk instead.
+_ENGINE_LOOKUP_SNIPPET = """\
+ENGINE=$(awk '
+  /^[[:space:]]*\\[/ { sec=$0; gsub(/[[:space:]]/,"",sec) }
+  sec=="[algorithm]" && /^[[:space:]]*engine[[:space:]]*=/ {
+      match($0, /"[^"]*"/); print substr($0, RSTART+1, RLENGTH-2); exit
+  }' "$RUN_DIR/config.toml")
+: "${ENGINE:=dmrg}"
+"""
+
+
+def _engine_from_config(run_dir: Path) -> str:
+    """Return the algorithm engine selected by a run's `config.toml`.
+
+    The `[algorithm] engine` key is the single source of truth for which
+    runner script executes the run.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+
+    Returns
+    -------
+    str
+        Lower-case engine name; `"dmrg"` when the key is absent.
+    """
+    config_path = run_dir / "config.toml"
+    if not config_path.exists():
+        return "dmrg"
+    cfg = load_config(config_path)
+    return str(cfg.get("algorithm", {}).get("engine", "dmrg")).lower()
+
+
+# ---------------------------------------------------------------------------
 # Slurm script rendering
 # ---------------------------------------------------------------------------
 
@@ -136,6 +178,7 @@ def _build_single_script(
     slurm: SlurmTomlConfig,
     python_cmd: str,
     run_id: str,
+    engine: str = "dmrg",
     scratch_node: str = "/tmp/$USER",
 ) -> str:
     """Render the Slurm submit script for a single primary job.
@@ -150,6 +193,9 @@ def _build_single_script(
         Command used to invoke the runner (e.g. `"uv run"`).
     run_id:
         Run identifier used as the Slurm job name.
+    engine:
+        Algorithm engine selected by the run's `config.toml`; determines
+        which `algorithm/run_<engine>.py` script is invoked.
     scratch_node:
         Per-node local scratch directory (may contain shell variables such as
         `$USER`).  The Yuzuha cache is placed under `.yuzuha/` inside this
@@ -189,12 +235,12 @@ def _build_single_script(
         f'RUN_DIR="{run_dir}"\n'
         f'export YUZUHA_CACHE_PATH="{scratch_node}/.yuzuha"\n'
         "\n"
-        'echo "Starting DMRG run: $RUN_DIR"\n'
+        f'echo "Starting {engine.upper()} run: $RUN_DIR"\n'
         'echo "SLURM_JOB_ID: $SLURM_JOB_ID"\n'
         'echo "SLURM_NODELIST: $SLURM_NODELIST"\n'
         "\n"
         'cd "$RUN_DIR"\n'
-        f'{python_cmd} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"\n'
+        f'{python_cmd} "$RUN_DIR/algorithm/run_{engine}.py" --run-dir "$RUN_DIR"\n'
     )
 
 
@@ -277,12 +323,15 @@ def _build_array_script(
         "\n"
         'RUN_DIR="$RUNS_ROOT/$RUN_ID"\n'
         "\n"
-        'echo "Starting DMRG run: $RUN_DIR"\n'
+        "# Each run selects its own engine, so resolve it per array task.\n"
+        f"{_ENGINE_LOOKUP_SNIPPET}"
+        "\n"
+        'echo "Starting $ENGINE run: $RUN_DIR"\n'
         'echo "SLURM_ARRAY_TASK_ID: $SLURM_ARRAY_TASK_ID  RUN_ID: $RUN_ID"\n'
         'echo "SLURM_NODELIST: $SLURM_NODELIST"\n'
         "\n"
         'cd "$RUN_DIR"\n'
-        f'{python_cmd} "$RUN_DIR/algorithm/run_dmrg.py" --run-dir "$RUN_DIR"\n'
+        f'{python_cmd} "$RUN_DIR/algorithm/run_$ENGINE.py" --run-dir "$RUN_DIR"\n'
     )
 
 
@@ -362,6 +411,38 @@ def _build_exec_script(
 # Helper utilities
 # ---------------------------------------------------------------------------
 
+def _bundled_algorithms() -> List[str]:
+    """Return the names of every runner script bundled with IntraKnot.
+
+    A campaign receives all of them so that any run may select its engine
+    through `[algorithm] engine` in `config.toml` without the campaign
+    having to be recreated.
+
+    Returns
+    -------
+    list of str
+        Sorted algorithm names, e.g. `["dmrg", "xtrg"]`.
+    """
+    # Fast path: real directory on disk (editable installs and extracted wheels).
+    alg_dir = Path(__file__).parent / "algorithm"
+    if alg_dir.is_dir():
+        names = {p.stem.removeprefix("run_") for p in alg_dir.glob("run_*.py")}
+        if names:
+            return sorted(names)
+
+    # Fallback: package may be inside a zip, where glob is unavailable.
+    try:
+        entries = importlib.resources.files("intraknot.algorithm").iterdir()
+        names = {
+            entry.name[len("run_"):-len(".py")]
+            for entry in entries
+            if entry.name.startswith("run_") and entry.name.endswith(".py")
+        }
+    except (FileNotFoundError, TypeError, AttributeError):
+        return []
+    return sorted(names)
+
+
 def _algorithm_source_path(algorithm: str) -> Path:
     """Return the path of the bundled runner script for `algorithm`.
 
@@ -421,29 +502,21 @@ def _copy_algorithm(src: Path, dest_dir: Path) -> None:
     shutil.copy2(src, alg_dir / src.name)
 
 
-def _write_initial_lock(campaign_dir: Path, algorithm: str) -> None:
+def _write_initial_lock(campaign_dir: Path, algorithms: List[str]) -> None:
     """Write `algorithm/algorithm.lock` for a freshly created campaign.
 
-    Records the copied runner script as the single managed entry, sourced
-    from the installed `intraknot` package.
+    Records every copied runner script as a managed entry, sourced from the
+    installed `intraknot` package.
 
     Parameters
     ----------
     campaign_dir:
         Campaign directory whose `algorithm/` subdirectory was just
         populated by `_copy_algorithm`.
-    algorithm:
-        Algorithm name, e.g. `"dmrg"`.
+    algorithms:
+        Algorithm names whose runners were copied, e.g. `["dmrg", "xtrg"]`.
     """
     alg_dir = campaign_dir / "algorithm"
-    script_file = f"run_{algorithm}.py"
-    script_path = alg_dir / script_file
-    if not script_path.exists():
-        # Should not happen under normal operation; skip silently rather than
-        # crashing the campaign creation.
-        return
-
-    sha256 = _sha256_path(script_path)
 
     # Try to record the intraknot package version for traceability.
     try:
@@ -452,14 +525,20 @@ def _write_initial_lock(campaign_dir: Path, algorithm: str) -> None:
     except Exception:
         pkg_version = None
 
-    entry = make_managed_entry(
-        file=script_file,
-        source=f"intraknot:algorithm/{script_file}",
-        sha256=sha256,
-        installed_from_version=pkg_version,
-    )
     lock = AlgorithmLock()
-    lock.add_managed(entry)
+    for algorithm in algorithms:
+        script_file = f"run_{algorithm}.py"
+        script_path = alg_dir / script_file
+        if not script_path.exists():
+            # Should not happen under normal operation; skip silently rather
+            # than crashing the campaign creation.
+            continue
+        lock.add_managed(make_managed_entry(
+            file=script_file,
+            source=f"intraknot:algorithm/{script_file}",
+            sha256=_sha256_path(script_path),
+            installed_from_version=pkg_version,
+        ))
     lock.save(alg_dir / "algorithm.lock")
 
 
@@ -532,6 +611,85 @@ def _find_exec_script(
 # Campaign creation
 # ---------------------------------------------------------------------------
 
+# Per-engine `[algorithm]` blocks for a freshly created campaign's
+# defaults.toml. The block chosen at creation only seeds the template; the
+# engine that actually runs is whatever `[algorithm] engine` says in each
+# run's config.toml, so a campaign is never locked to one algorithm.
+_ALGORITHM_DEFAULT_BLOCKS: Dict[str, str] = {
+    "dmrg": (
+        "[algorithm]\n"
+        "engine       = \"dmrg\"\n"
+        "scheme       = \"1sp\"   # '2s' or '1sp'\n"
+        "max_bond     = 64\n"
+        "n_sweeps     = 20\n"
+        "e_tol        = 1.0e-8\n"
+        "trunc_thresh = 1.0e-15\n"
+        "init         = \"random\"   # 'product', 'random', or 'resume'\n"
+        "seed         = 42\n"
+        "expand_k     = 8\n"
+        "expand_alpha = 16\n"
+    ),
+    "xtrg": (
+        "[algorithm]\n"
+        "engine        = \"xtrg\"\n"
+        "scheme        = \"2s\"    # '1s', '2s', or '1sp'\n"
+        "tau_0         = 2.44140625e-4   # initial inverse temperature\n"
+        "n_steps       = 20      # doubling steps; beta_max = 2^n_steps * tau_0\n"
+        "taylor_order  = 10\n"
+        "max_bond      = 64\n"
+        "trunc_thresh  = 1.0e-15\n"
+        "n_sweeps      = 4\n"
+        "expand_k      = 8\n"
+        "expand_alpha  = 16\n"
+        "save_artifacts = true\n"
+    ),
+}
+
+
+def _defaults_toml_text(algorithm: str) -> str:
+    """Render the `defaults.toml` template for a new campaign.
+
+    Parameters
+    ----------
+    algorithm:
+        Engine whose `[algorithm]` block seeds the template.
+
+    Returns
+    -------
+    str
+        Complete TOML text.
+
+    Raises
+    ------
+    ValueError
+        If no default block is defined for `algorithm`.
+    """
+    block = _ALGORITHM_DEFAULT_BLOCKS.get(algorithm)
+    if block is None:
+        known = ", ".join(sorted(_ALGORITHM_DEFAULT_BLOCKS))
+        raise ValueError(
+            f"No defaults template for algorithm {algorithm!r}. Known: {known}."
+        )
+    return (
+        "# Campaign-level default settings.\n"
+        "# Values here are inherited by all runs and can be overridden per-run.\n"
+        "# The [algorithm] engine key selects which runner executes each run.\n\n"
+        "[geometry]\n"
+        "lattice = \"_init_\"\n"
+        "lx      = 0\n"
+        "bcx     = \"OBC\"\n"
+        "n2x     = true\n\n"
+        "[model]\n"
+        "category = \"_init_\"  # 'bosonic', 'fermionic', or 'conductor'\n"
+        "label    = \"_init_\"\n"
+        "symmetry = \"_init_\"\n\n"
+        f"{block}\n"
+        "[output]\n"
+        "save_state      = true\n"
+        "observables     = [\"energy\", \"entropy\"]\n"
+    )
+
+
 def create_campaign(
     campaign_id: str,
     description: str,
@@ -542,10 +700,15 @@ def create_campaign(
     """Create a new campaign directory with all standard files.
 
     Writes `campaign.yaml`, a template `defaults.toml`, an empty `runs.csv`
-    (header only), a blank `notes.md`, and copies the algorithm runner to
-    `<campaign_id>/algorithm/`. A `slurm.toml` is copied from `configs_dir`
-    if provided and the file exists there, otherwise the default template is
-    written directly.
+    (header only), a blank `notes.md`, and copies every bundled algorithm
+    runner to `<campaign_id>/algorithm/`. A `slurm.toml` is copied from
+    `configs_dir` if provided and the file exists there, otherwise the
+    default template is written directly.
+
+    All runners are copied because the engine that executes a run is chosen
+    per run through `[algorithm] engine` in its `config.toml`. The
+    `algorithm` argument therefore only seeds the `[algorithm]` block of
+    `defaults.toml` and is recorded in `campaign.yaml` for provenance.
 
     Parameters
     ----------
@@ -554,7 +717,7 @@ def create_campaign(
     description:
         Human-readable description of the campaign's scientific purpose.
     algorithm:
-        Algorithm name whose runner script will be copied (e.g. `"dmrg"`).
+        Engine whose defaults seed `defaults.toml` (e.g. `"dmrg"`).
     campaigns_root:
         Parent directory where the campaign subdirectory is created.
     configs_dir:
@@ -571,7 +734,12 @@ def create_campaign(
     ------
     FileExistsError
         If a campaign with `campaign_id` already exists.
+    ValueError
+        If `algorithm` is not a known engine.
     """
+    # Validate before creating anything so a typo leaves no partial campaign.
+    _defaults_toml_text(algorithm)
+
     campaign_dir = campaigns_root / campaign_id
     if campaign_dir.exists():
         raise FileExistsError(f"Campaign already exists: {campaign_dir}")
@@ -589,33 +757,7 @@ def create_campaign(
     )
 
     # defaults.toml — template for geometry, model, algorithm, and output defaults.
-    (campaign_dir / "defaults.toml").write_text(
-        "# Campaign-level default settings.\n"
-        "# Values here are inherited by all runs and can be overridden per-run.\n\n"
-        "[geometry]\n"
-        "lattice = \"_init_\"\n"
-        "lx      = 0\n"
-        "bcx     = \"OBC\"\n"
-        "n2x     = true\n\n"
-        "[model]\n"
-        "category = \"_init_\"  # 'bosonic', 'fermionic', or 'conductor'\n"
-        "label    = \"_init_\"\n"
-        "symmetry = \"_init_\"\n\n"
-        "[algorithm]\n"
-        "engine       = \"dmrg\"\n"
-        "scheme       = \"1sp\"   # '2s' or '1sp'\n"
-        "max_bond     = 64\n"
-        "n_sweeps     = 20\n"
-        "e_tol        = 1.0e-8\n"
-        "trunc_thresh = 1.0e-15\n"
-        "init         = \"random\"   # 'product', 'random', or 'resume'\n"
-        "seed         = 42\n"
-        "expand_k     = 8\n"
-        "expand_alpha = 16\n\n"
-        "[output]\n"
-        "save_state      = true\n"
-        "observables     = [\"energy\", \"entropy\"]\n"
-    )
+    (campaign_dir / "defaults.toml").write_text(_defaults_toml_text(algorithm))
 
     # slurm.toml — copy from configs/ or write built-in template.
     slurm_dest = campaign_dir / "slurm.toml"
@@ -636,10 +778,14 @@ def create_campaign(
     # Logs directory for array job output.
     (campaign_dir / "logs").mkdir()
 
-    # Copy algorithm runner and write the initial algorithm.lock.
-    src = _algorithm_source_path(algorithm)
-    _copy_algorithm(src, campaign_dir)
-    _write_initial_lock(campaign_dir, algorithm)
+    # Copy every bundled runner so any run in this campaign can select its
+    # engine through config.toml, then record them all in algorithm.lock.
+    # The seed engine is included explicitly so its runner is guaranteed
+    # present even if discovery comes up empty.
+    algorithms = sorted(set(_bundled_algorithms()) | {algorithm})
+    for name in algorithms:
+        _copy_algorithm(_algorithm_source_path(name), campaign_dir)
+    _write_initial_lock(campaign_dir, algorithms)
 
     return campaign_dir
 
@@ -760,9 +906,9 @@ def create_run(
     else:
         write_slurm_toml(run_dir / "slurm.toml")
 
-    # manifest.yaml — identity record (YAML).
-    campaign_yaml = load_config(campaign_dir / "campaign.yaml")
-    algorithm = campaign_yaml.get("algorithm", "dmrg")
+    # manifest.yaml — identity record (YAML). The algorithm is provenance
+    # derived from the merged config, which is what actually dispatches.
+    algorithm = str(merged_cfg.get("algorithm", {}).get("engine", "dmrg")).lower()
     if run_uuid is None:
         run_uuid = _uuid_lib.uuid4()
     manifest = {
@@ -787,10 +933,11 @@ def create_run(
     run_alg_dir = run_dir / "algorithm"
     if campaign_alg_dir.exists():
         shutil.copytree(campaign_alg_dir, run_alg_dir)
-    else:
-        # Fallback for legacy campaigns that have no algorithm/ directory.
-        runner = _algorithm_source_path(algorithm)
-        _copy_algorithm(runner, run_dir)
+
+    # Legacy campaigns predate the copy-every-runner behavior, so the runner
+    # selected by this run's engine may be absent. Supply it from the package.
+    if not (run_dir / "algorithm" / f"run_{algorithm}.py").exists():
+        _copy_algorithm(_algorithm_source_path(algorithm), run_dir)
 
     # Register the run in the campaign's runs.csv.
     _register_run_in_campaign(campaign_dir, run_id, scan_id=scan_id)
@@ -1035,8 +1182,8 @@ def write_slurm_script(
 ) -> Path:
     """Render and write `main/submit.slurm` for a single-run primary job.
 
-    Reads Slurm settings from `run_dir/slurm.toml`. Creates `main/logs/` if
-    it does not yet exist.
+    Reads Slurm settings from `run_dir/slurm.toml` and the algorithm engine
+    from `run_dir/config.toml`. Creates `main/logs/` if it does not yet exist.
 
     Parameters
     ----------
@@ -1052,6 +1199,12 @@ def write_slurm_script(
     -------
     Path
         Path to the written `submit.slurm` file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the runner for the configured engine is missing from the run's
+        `algorithm/` directory.
     """
     if run_id is None:
         run_id = run_dir.name
@@ -1060,8 +1213,19 @@ def write_slurm_script(
     log_dir = run_dir / "main" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    engine = _engine_from_config(run_dir)
+    runner = run_dir / "algorithm" / f"run_{engine}.py"
+    if not runner.exists():
+        raise FileNotFoundError(
+            f"Runner for engine {engine!r} not found: {runner}. Check "
+            "[algorithm] engine in config.toml."
+        )
+
     slurm = load_slurm_toml(run_dir / "slurm.toml")
-    script = _build_single_script(run_dir, slurm, machine.paths.command, run_id, machine.paths.scratch_node)
+    script = _build_single_script(
+        run_dir, slurm, machine.paths.command, run_id, engine,
+        machine.paths.scratch_node,
+    )
 
     out = run_dir / "main" / "submit.slurm"
     out.write_text(script)
