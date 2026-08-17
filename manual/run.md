@@ -70,7 +70,7 @@ Run ID format:
 <engine>_<model_label>_<lattice_descriptor>[_<key1>=<val1>_<key2>=<val2>]_<uuid8>
 ```
 
-- `engine` — algorithm engine, lower-case (e.g. `dmrg`)
+- `engine` — algorithm engine from `[algorithm] engine`, lower-case (e.g. `dmrg`); it also selects the runner script that executes the run
 - `model_label` — model label from config, lower-case (e.g. `heisenberg`)
 - `lattice_descriptor` — geometry-aware size descriptor:
   - 1-D: `<lattice>_len=<lx>` (e.g. `chain_len=20`)
@@ -105,7 +105,8 @@ runs/<RUN_ID>/
 ├── slurm.toml              # Slurm settings (copied from campaign's slurm.toml)
 ├── initial.ckpt            # symlink → campaigns/<id>/initial.ckpt (only when init="ckpt")
 ├── algorithm/
-│   └── run_dmrg.py         # algorithm runner script (copied from campaign)
+│   ├── run_dmrg.py         # runner scripts (copied from campaign)
+│   └── run_xtrg.py         # the one matching [algorithm] engine is executed
 ├── main/
 │   ├── status.json         # initial state: {"state": "pending", ...}
 │   ├── attempts/           # one subdirectory per execution attempt
@@ -197,6 +198,8 @@ All four keys are optional and independent: specify only the stages you want to 
 ### `iknot run submit [RUN_ID]`
 
 Writes `main/submit.slurm` from the run's `slurm.toml` and submits it to the Slurm scheduler with `sbatch`. The assigned job ID is recorded in `main/job_id.txt`.
+
+The script invokes `algorithm/run_<engine>.py`, where `engine` comes from `[algorithm] engine` in the run's `config.toml`. Submission fails immediately if that runner is not present in the run's `algorithm/` directory.
 
 Provide either a positional `RUN_ID` to submit a single run, or `--scan` to submit all runs belonging to a scan (optionally filtered by `--status`).
 
