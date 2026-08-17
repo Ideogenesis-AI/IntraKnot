@@ -371,7 +371,7 @@ def _write_observables(
         "algorithm": "xtrg",
         "alice_version": alice.__version__,
         "system_size": L,
-        "converged": summary.converged,
+        "converged": summary.finished,
         "n_steps": summary.n_steps,
         "beta": beta,
         "temperature": 1.0 / beta,
@@ -550,9 +550,12 @@ def run(run_dir: Path) -> None:
         _write_observables(attempt_dir, summary, artifact, L)
         _write_thermodynamics(attempt_dir, summary)
 
-        # Determine final status. A finished XTRG schedule reports
-        # converged=True; treat a False flag as an incomplete cooling run.
-        if summary.converged:
+        # Determine final status. `Summary.finished` is True only for the
+        # summary returned by a completed `run()` call (Alice raises on
+        # mid-run interruption rather than returning a partial summary, so
+        # this is always True on this success path; the False branch below
+        # only matters if that ever changes).
+        if summary.finished:
             end_state = RunState.COMPLETED
             end_reason = FailureReason.CONVERGED
             restartable = False
