@@ -164,16 +164,13 @@ runs/heis_L64_chi128_g1.0/
 │           ├── info.json
 │           ├── conv.csv
 │           └── status.json
-├── exec/                # all exec (follow-up) jobs; one slot per script
-│   └── compute_sf/
-│       ├── submit.slurm
-│       ├── job_id.txt
-│       ├── status.json
-│       ├── logs/
-│       └── <outputs>
-└── summary/
-    ├── info.json
-    └── status.json
+└── exec/                # all exec (follow-up) jobs; one slot per script
+    └── compute_sf/
+        ├── submit.slurm
+        ├── job_id.txt
+        ├── status.json
+        ├── logs/
+        └── <outputs>
 ```
 
 `config.toml` is the source of truth for the scientific configuration of a run and must not be silently modified after the run is created. `slurm.toml` is the source of truth for Slurm resource requests; edit it before submitting if a particular run needs non-default resources.
