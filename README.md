@@ -37,7 +37,8 @@ intraknot/
 │       ├── discover.py      # cluster hardware discovery (sinfo)
 │       ├── tui.py           # interactive campaign dashboard
 │       └── algorithm/
-│           └── run_dmrg.py  # IntraKnot-aware DMRG runner
+│           ├── run_dmrg.py  # IntraKnot-aware DMRG runner
+│           └── run_xtrg.py  # IntraKnot-aware XTRG runner
 ├── configs/                 # machine, path, and scheduler settings
 ├── campaigns/               # scientific groupings and run indexes
 ├── runs/                    # actual simulation cases
@@ -115,9 +116,12 @@ campaigns/heisenberg_dmrg_chi_scan/
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
 └── algorithm/
-    ├── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
+    ├── run_dmrg.py     # bundled runners, copied from src/intraknot/algorithm/
+    ├── run_xtrg.py
     └── <any>.py        # custom exec scripts placed here are auto-discovered
 ```
+
+Every bundled runner is copied into each campaign, because the engine that executes a run is chosen per run by `[algorithm] engine` in its `config.toml`. The `--algorithm` flag on `iknot campaign create` therefore only selects which engine's defaults seed `defaults.toml`; it does not restrict the campaign to one algorithm.
 
 `defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
@@ -142,7 +146,8 @@ runs/heis_L64_chi128_g1.0/
 ├── config.toml          # TOML: physics-only config (geometry, model, algorithm, output)
 ├── slurm.toml           # TOML: Slurm resources (copied from campaign; edit before submit)
 ├── algorithm/
-│   ├── run_dmrg.py      # primary runner, copied from campaign/algorithm/
+│   ├── run_dmrg.py      # runners, copied from campaign/algorithm/
+│   ├── run_xtrg.py      # the one matching [algorithm] engine is executed
 │   └── <any>.py         # exec scripts promoted here on first use
 ├── main/
 │   ├── submit.slurm     # Slurm script for the primary job
@@ -176,6 +181,8 @@ runs/heis_L64_chi128_g1.0/
 ### Run scientific config (`config.toml`)
 
 Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding `[algorithm]` and `[output]` sections. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
+
+`[algorithm] engine` selects the algorithm: the submit script invokes `algorithm/run_<engine>.py`, and each runner refuses a config naming a different engine. Runs in one campaign — even in one array job — may use different engines.
 
 ```toml
 [geometry]
@@ -248,7 +255,7 @@ Activate a campaign so that subsequent `run create` commands are automatically a
 ```bash
 iknot campaign create heisenberg_dmrg_chi_scan \
     --description "DMRG chi scan for Heisenberg chain" \
-    --algorithm dmrg
+    --algorithm dmrg   # seeds defaults.toml; all runners are copied regardless
 
 iknot campaign activate heisenberg_dmrg_chi_scan
 # also prints instructions to run: export INTRAKNOT_CAMPAIGN=heisenberg_dmrg_chi_scan
