@@ -418,6 +418,38 @@ def _init_mps(
 
 
 # ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+
+class _EngineMismatch(ValueError):
+    """Raised when `config.toml` selects an engine other than DMRG."""
+
+
+def _validate_config(cfg_algo: Dict[str, Any]) -> None:
+    """Reject orchestration settings inconsistent with this runner.
+
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    a mismatch here means the wrong runner was dispatched. Failing fast is
+    safer than silently running a different algorithm.
+
+    Parameters
+    ----------
+    cfg_algo:
+        `config["algorithm"]` dict.
+
+    Raises
+    ------
+    _EngineMismatch
+        If `engine` is set to anything other than `"dmrg"`.
+    """
+    engine = str(cfg_algo.get("engine", "dmrg")).lower()
+    if engine != "dmrg":
+        raise _EngineMismatch(
+            f"run_dmrg.py requires algorithm.engine='dmrg', got {engine!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Output writers
 # ---------------------------------------------------------------------------
 
@@ -574,6 +606,8 @@ def run(run_dir: Path) -> None:
     restartable = True
 
     try:
+        _validate_config(cfg_algo)
+
         # Build Hamiltonian.
         interactions, spc, geo = build_interaction(cfg_model)
         mpo = build_hamiltonian(interactions, geo.L, spc)
@@ -622,10 +656,24 @@ def run(run_dir: Path) -> None:
             end_reason = FailureReason.NOT_CONVERGED
             restartable = True
 
+    except _EngineMismatch:
+        logger.exception("Engine mismatch: wrong runner dispatched")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
     except MemoryError:
         logger.exception("Out of memory")
         end_reason = FailureReason.OUT_OF_MEMORY
         restartable = True
+    except (FileNotFoundError, KeyError, TypeError, ValueError, NotImplementedError):
+        logger.exception("Invalid DMRG configuration")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
+    except RuntimeError:
+        logger.exception("DMRG numerical failure")
+        end_reason = FailureReason.LINEAR_ALGEBRA_ERROR
+        restartable = False
     except Exception:
         logger.exception("Unhandled exception during DMRG")
         end_reason = FailureReason.SCHEDULER_FAILURE
