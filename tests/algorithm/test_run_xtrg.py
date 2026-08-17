@@ -33,7 +33,7 @@ import pytest
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _write_config_toml(run_dir: Path, extra: str = "") -> None:
+def _write_config_toml(run_dir: Path, extra: str = "", engine: str = "xtrg") -> None:
     """Write a minimal `config.toml` into `run_dir`.
 
     Parameters
@@ -42,12 +42,14 @@ def _write_config_toml(run_dir: Path, extra: str = "") -> None:
         Run directory that will receive `config.toml`.
     extra:
         Additional TOML text appended verbatim (e.g. a `[plugin]` section).
+    engine:
+        Value of `[algorithm] engine`.
     """
     (run_dir / "config.toml").write_text(
         '[geometry]\nlattice = "chain"\nlx = 8\n'
         '[model]\ncategory = "bosonic"\nlabel = "Heisenberg"\n'
         'symmetry = "U1"\nspin = 0.5\nJ = 1.0\n'
-        '[algorithm]\nengine = "xtrg"\nn_steps = 2\ntau_0 = 0.001\n'
+        f'[algorithm]\nengine = "{engine}"\nn_steps = 2\ntau_0 = 0.001\n'
         + extra
     )
 
@@ -202,7 +204,11 @@ class TestAttemptDirectory:
 # ---------------------------------------------------------------------------
 
 class TestValidateConfig:
-    """Tests for `_validate_config`."""
+    """Tests for `_validate_config`.
+
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    this runner must refuse a config that selects a different engine.
+    """
 
     def test_accepts_xtrg_engine(self):
         from intraknot.algorithm.run_xtrg import _validate_config
@@ -213,9 +219,47 @@ class TestValidateConfig:
         _validate_config({})
 
     def test_rejects_other_engine(self):
-        from intraknot.algorithm.run_xtrg import _validate_config
-        with pytest.raises(ValueError, match="engine"):
+        from intraknot.algorithm.run_xtrg import _EngineMismatch, _validate_config
+        with pytest.raises(_EngineMismatch, match="engine"):
             _validate_config({"engine": "dmrg"})
+
+    def test_run_marks_engine_mismatch_invalid(self, tmp_path):
+        """A mis-dispatched run must not be retried with the same config."""
+        from intraknot.algorithm import run_xtrg
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir, engine="dmrg")
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        calls: list = []
+
+        with (
+            patch.object(run_xtrg, "alice") as mock_alice,
+            patch.object(run_xtrg, "logging") as ml,
+            patch.object(
+                run_xtrg, "build_interaction",
+                return_value=([], MagicMock(), mock_geo),
+            ),
+            patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_xtrg, "xtrg") as mock_xtrg,
+            patch.object(
+                run_xtrg, "write_status",
+                side_effect=lambda p, s: calls.append((p, s)),
+            ),
+        ):
+            mock_alice.__version__ = "0.0.0"
+            ml.INFO = 20
+            with pytest.raises(SystemExit):
+                run_xtrg.run(run_dir)
+
+        mock_xtrg.run.assert_not_called()
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
 
 
 class TestValidateOptions:
