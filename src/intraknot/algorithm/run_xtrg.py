@@ -32,14 +32,20 @@ XTRG checkpoint and artifact persistence inside that attempt directory.
 IntraKnot supplies lifecycle bookkeeping and writes small, analysis-friendly
 JSON and CSV projections of Alice's thermodynamic history.
 
-XTRG cooling
-------------
-Unlike DMRG, a finished XTRG schedule is a fixed number of doubling steps
-rather than an iterative search that can resume mid-sweep. Alice writes
+XTRG cooling and resumption
+---------------------------
+An XTRG schedule is a fixed number of doubling steps: Alice writes
 `thermal.ckpt` after every completed cooling step and `progress.ckpt` for
 the most recent density-matrix snapshot, then removes `progress.ckpt` on
-successful completion. Alice does not currently expose continuation from
-`progress.ckpt`, so a new attempt always starts a fresh cooling schedule.
+successful completion. If an earlier attempt for this run was interrupted,
+this runner resumes automatically: it locates the most recent
+`progress.ckpt` across all prior attempts, loads it as the starting
+`alice.algorithm.xtrg.Artifact`, copies the matching `thermal.ckpt`
+alongside it into the new attempt directory (Alice reads that file to
+recover the β/log Z history when resuming past step 0), and continues
+squaring from that step onward rather than rebuilding ρ(τ₀) from scratch.
+When no prior `progress.ckpt` exists, ρ(τ₀) is built fresh via a Taylor
+expansion (`thermal_mpo`).
 
 Outputs (written to `main/attempts/attempt_NN/`)
 ------------------------------------------------
@@ -76,6 +82,7 @@ import datetime
 import json
 import logging
 import math
+import shutil
 import socket
 import sys
 import tomllib
@@ -85,6 +92,7 @@ from typing import Any, Dict, Optional, Tuple
 import alice
 from alice import build_hamiltonian, build_interaction
 from alice.algorithm import xtrg
+from alice.network.thermal import thermal_mpo
 
 # IntraKnot status helpers — imported from the installed package when run via
 # `uv run`, or resolved by climbing the directory tree for direct invocation.
@@ -182,6 +190,35 @@ def _resolve_attempt_dir(run_dir: Path) -> Tuple[Path, str]:
                 continue
     name = f"attempt_{max(indices, default=0) + 1:02d}"
     return attempts_root / name, name
+
+
+def _find_latest_progress(run_dir: Path) -> Optional[Path]:
+    """Return the most recent `progress.ckpt` across all prior attempts, or `None`.
+
+    Iterates attempt directories in reverse order and returns the first
+    checkpoint found, so the latest attempt is preferred. A `progress.ckpt`
+    is present only when a prior attempt was interrupted mid-schedule;
+    Alice deletes it after a successful `run()` call.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+
+    Returns
+    -------
+    Path | None
+        Path to the checkpoint file, or `None` if no checkpoint exists.
+    """
+    attempts_root = run_dir / "main" / "attempts"
+    if not attempts_root.exists():
+        return None
+
+    for attempt_dir in sorted(attempts_root.iterdir(), reverse=True):
+        ckpt = attempt_dir / "progress.ckpt"
+        if ckpt.exists():
+            return ckpt
+    return None
 
 
 def _update_current(run_dir: Path, attempt_name: str) -> None:
@@ -524,8 +561,17 @@ def run(run_dir: Path) -> None:
 
     end_state = RunState.FAILED
     end_reason: Optional[FailureReason] = FailureReason.SCHEDULER_FAILURE
-    # Retrying starts a new XTRG schedule; it does not continue progress.ckpt.
+    # Retrying resumes from the latest progress.ckpt when one exists (see
+    # _find_latest_progress below), so this is a genuine continuation, not a
+    # restart from tau_0.
     restartable = True
+
+    # Locate any prior progress checkpoint for resume support, before the
+    # try block so a lookup failure cannot be mistaken for an Alice error.
+    # Exclude the current (freshly created, empty) attempt dir from the search.
+    prior_progress = _find_latest_progress(run_dir)
+    if prior_progress is not None and prior_progress.parent == attempt_dir:
+        prior_progress = None
 
     try:
         _validate_config(cfg_algo)
@@ -542,8 +588,37 @@ def run(run_dir: Path) -> None:
         _validate_options(opts)
         opts.checkpoint_dir = str(attempt_dir)
 
+        # Build the starting density-matrix state: resume from the latest
+        # progress.ckpt left by an interrupted prior attempt, or build
+        # rho(tau_0) fresh via a Taylor expansion.
+        if prior_progress is not None:
+            state = xtrg.Artifact.load(prior_progress)
+            logger.info(
+                "Resuming from %s (step %d / %d, beta=%.6g)",
+                prior_progress, state.step, opts.n_steps, state.beta,
+            )
+            # Alice's run() recovers the beta/log Z history for step > 0 by
+            # reading thermal.ckpt from opts.checkpoint_dir, so the file
+            # written alongside the resumed progress.ckpt must be copied
+            # into this attempt's (freshly created, otherwise empty) directory.
+            if state.step > 0:
+                prior_thermal = prior_progress.parent / "thermal.ckpt"
+                if not prior_thermal.exists():
+                    raise FileNotFoundError(
+                        f"progress.ckpt at {prior_progress} is at step {state.step} "
+                        f"but no matching thermal.ckpt was found at {prior_thermal}"
+                    )
+                shutil.copy2(prior_thermal, attempt_dir / "thermal.ckpt")
+        else:
+            logger.info(
+                "Building initial state: rho(tau_0=%.6g) via Taylor expansion "
+                "(order %d)", opts.tau_0, opts.taylor_order,
+            )
+            rho0 = thermal_mpo(mpo, opts.tau_0, opts.taylor_order, spc)
+            state = xtrg.Artifact(rho=rho0, beta=opts.tau_0, step=0)
+
         # --- Run XTRG ---
-        summary, artifact = xtrg.run(mpo, spc, opts)
+        summary, artifact = xtrg.run(state, opts)
         _validate_summary(summary, artifact)
 
         # Write observables and thermodynamic history.
@@ -554,7 +629,10 @@ def run(run_dir: Path) -> None:
         # summary returned by a completed `run()` call (Alice raises on
         # mid-run interruption rather than returning a partial summary, so
         # this is always True on this success path; the False branch below
-        # only matters if that ever changes).
+        # only matters if that ever changes). Should it ever be False,
+        # `restartable=True` is now accurate: the next attempt will resume
+        # from `progress.ckpt` via `_find_latest_progress` above rather than
+        # restarting the cooling schedule from tau_0.
         if summary.finished:
             end_state = RunState.COMPLETED
             end_reason = FailureReason.CONVERGED
