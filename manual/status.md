@@ -29,7 +29,7 @@ iknot status [OPTIONS] RUN_ID
 
 ### Output
 
-#### Example — completed run
+#### Example — completed DMRG run
 
 ```
 Run             : chi128
