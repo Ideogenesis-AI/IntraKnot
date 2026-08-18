@@ -392,7 +392,7 @@ class TestWriteObservables:
         assert data["algorithm"] == "xtrg"
         assert data["alice_version"] == "9.9.9"
         assert data["system_size"] == 8
-        assert data["converged"] is True
+        assert data["finished"] is True
         assert data["n_steps"] == 2
         assert data["beta"] == pytest.approx(artifact.beta)
         assert data["temperature"] == pytest.approx(1.0 / artifact.beta)
@@ -540,6 +540,20 @@ class TestRunStatus:
         main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
         assert main_calls[-1][1].state == RunState.COMPLETED
 
+    def test_finished_summary_sets_finished_reason(self, tmp_path):
+        """XTRG's success reason is `finished`, not `converged` — XTRG has no
+        numerical convergence criterion, only a fixed cooling schedule."""
+        from intraknot.status import FailureReason
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+
+        calls = self._collect_status_calls(run_dir, converged=True)
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].reason == FailureReason.FINISHED
+
     def test_not_converged_sets_failed_on_main_status(self, tmp_path):
         from intraknot.status import RunState
 
@@ -551,6 +565,21 @@ class TestRunStatus:
 
         main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
         assert main_calls[-1][1].state == RunState.FAILED
+
+    def test_unfinished_summary_sets_not_finished_reason(self, tmp_path):
+        """The (currently dead) unfinished branch reports `not_finished`,
+        not `not_converged`, and remains retryable."""
+        from intraknot.status import FailureReason
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+
+        calls = self._collect_status_calls(run_dir, converged=False)
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].reason == FailureReason.NOT_FINISHED
+        assert main_calls[-1][1].restartable is True
 
     def test_attempt_status_starts_as_running(self, tmp_path):
         from intraknot.status import RunState
