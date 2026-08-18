@@ -336,6 +336,33 @@ class TestCmdStatus:
         assert "Energy" not in result.output
         assert "Converged" not in result.output
 
+    def test_shows_finished_from_xtrg_current_attempt(self, tmp_path):
+        """XTRG's info.json has no `converged` key; `finished` is shown instead.
+
+        XTRG has no numerical convergence criterion, so its `info.json` uses
+        `finished` (mirroring Alice's `Summary.finished`) rather than
+        `converged`.
+        """
+        runs_root = tmp_path / "runs"
+        run_dir = self._write_main_status(
+            runs_root, "r6",
+            current_attempt="attempt_01",
+            reason=FailureReason.FINISHED,
+        )
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "info.json").write_text(
+            json.dumps({"log_z": 5.5478936, "finished": True})
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r6", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reason          : finished" in result.output
+        assert "Finished        : True" in result.output
+        assert "Converged" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # iknot run start — scan exit code propagation
