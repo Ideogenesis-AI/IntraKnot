@@ -65,7 +65,7 @@ artifacts/step_XX.ckpt
     `algorithm.save_artifacts` and `algorithm.save_artifacts_since`.
 info.json
     Key scalar results: beta, free energy, energy, specific heat, entropy,
-    converged, n_steps, max_bond_dim.
+    finished, n_steps, max_bond_dim.
 thermodynamics.csv
     Per-step thermodynamic history: step, beta, temperature, log_z,
     free_energy_per_site, energy_per_site, specific_heat_per_site,
@@ -408,7 +408,7 @@ def _write_observables(
         "algorithm": "xtrg",
         "alice_version": alice.__version__,
         "system_size": L,
-        "converged": summary.finished,
+        "finished": summary.finished,
         "n_steps": summary.n_steps,
         "beta": beta,
         "temperature": 1.0 / beta,
@@ -635,11 +635,11 @@ def run(run_dir: Path) -> None:
         # restarting the cooling schedule from tau_0.
         if summary.finished:
             end_state = RunState.COMPLETED
-            end_reason = FailureReason.CONVERGED
+            end_reason = FailureReason.FINISHED
             restartable = False
         else:
             end_state = RunState.FAILED
-            end_reason = FailureReason.NOT_CONVERGED
+            end_reason = FailureReason.NOT_FINISHED
             restartable = True
 
     except _EngineMismatch:
