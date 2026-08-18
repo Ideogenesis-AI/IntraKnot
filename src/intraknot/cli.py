@@ -1668,10 +1668,15 @@ def cmd_status(run_id: str, runs_root: str) -> None:
                     info = json.loads(info_path.read_text())
                     energy = info.get("energy")
                     converged = info.get("converged")
+                    finished = info.get("finished")
                     if energy is not None:
                         click.echo(f"Energy          : {energy:.10f}")
                     if converged is not None:
                         click.echo(f"Converged       : {converged}")
+                    elif finished is not None:
+                        # XTRG has no convergence criterion; "finished" only
+                        # means the fixed cooling schedule completed.
+                        click.echo(f"Finished        : {finished}")
                 except (json.JSONDecodeError, OSError):
                     pass
 
