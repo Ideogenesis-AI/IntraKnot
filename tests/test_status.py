@@ -51,6 +51,13 @@ class TestFailureReason:
     def test_not_converged_is_retryable(self):
         assert FailureReason.NOT_CONVERGED in RETRYABLE_REASONS
 
+    def test_not_finished_is_retryable(self):
+        assert FailureReason.NOT_FINISHED in RETRYABLE_REASONS
+
+    def test_finished_round_trips(self):
+        assert FailureReason("finished") == FailureReason.FINISHED
+        assert FailureReason("not_finished") == FailureReason.NOT_FINISHED
+
 
 class TestAttemptStatus:
     def test_default_construction(self):
@@ -220,6 +227,7 @@ class TestRetryableReasons:
         FailureReason.SCHEDULER_FAILURE,
         FailureReason.CHECKPOINT_MISSING,
         FailureReason.NOT_CONVERGED,
+        FailureReason.NOT_FINISHED,
     ])
     def test_expected_reasons_are_retryable(self, reason):
         assert reason in RETRYABLE_REASONS
