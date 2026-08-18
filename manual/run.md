@@ -42,6 +42,12 @@ iknot run submit --scan chi_study
 iknot run submit --scan chi_study --status failed
 ```
 
+`create`, `submit`, and `start` are engine-agnostic — the same commands work unchanged for an XTRG campaign, sweeping XTRG-specific keys instead:
+
+```bash
+iknot run create --scan beta_study --set algorithm.tau_0=0.01,0.02,0.04
+```
+
 ### Auto-named single run
 
 ```bash
@@ -304,7 +310,7 @@ runs/<RUN_ID>/main/
 
 ### `iknot run exec <SCRIPT_NAME> <RUN_ID>`
 
-Runs a follow-up (exec) script against a completed run. Exec jobs are bespoke Python scripts for post-processing, measurement, or analysis that depend on the run's output (e.g. computing a structure factor or entanglement spectrum from the converged ground state).
+Runs a follow-up (exec) script against a completed run. Exec jobs are bespoke Python scripts for post-processing, measurement, or analysis that depend on the run's output (e.g. computing a structure factor or entanglement spectrum from a converged DMRG ground state, or a thermal expectation value from an XTRG cooling trajectory).
 
 #### Synopsis
 
