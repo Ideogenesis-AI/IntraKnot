@@ -125,7 +125,8 @@ def resume_run(
         )
 
     # Predict the next attempt path for display purposes only.
-    # Do NOT pre-create the directory here: the runner (run_dmrg.py) is
+    # Do NOT pre-create the directory here: the algorithm runner script
+    # (run_dmrg.py or run_xtrg.py, whichever `[algorithm] engine` selects) is
     # responsible for creating the attempt directory when the job starts.
     # Pre-creating it causes the runner to skip it and create one extra empty
     # attempt directory.
