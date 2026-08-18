@@ -130,7 +130,8 @@ class SlurmTomlConfig:
     basic:
         Shared account and mail settings.
     main:
-        Resource settings for the primary (DMRG) job.
+        Resource settings for the primary job (whichever engine `[algorithm]
+        engine` in `config.toml` selects — DMRG, XTRG, or another runner).
     exec_:
         Resource settings for exec (follow-up) jobs.
     """
