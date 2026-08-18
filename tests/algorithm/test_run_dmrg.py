@@ -759,7 +759,7 @@ class TestRunStatus:
 # ---------------------------------------------------------------------------
 
 class TestRunOutputFiles:
-    """run() must write info.json, conv.csv, and state.ckpt to the attempt directory."""
+    """run() must write info.json, conv.csv, and (on convergence) state.ckpt."""
 
     def test_info_json_written(self, tmp_path):
         run_dir = tmp_path / "run"
@@ -775,8 +775,8 @@ class TestRunOutputFiles:
         _run(run_dir)
         assert (run_dir / "main" / "attempts" / "attempt_01" / "conv.csv").exists()
 
-    def test_state_ckpt_saved_by_default(self, tmp_path):
-        """With the default `save_state = true`, summary.save is called."""
+    def test_state_ckpt_saved_when_converged(self, tmp_path):
+        """On a converged run, summary.save is called to write state.ckpt."""
         from intraknot.algorithm import run_dmrg
 
         run_dir = tmp_path / "run"
@@ -785,7 +785,7 @@ class TestRunOutputFiles:
 
         mock_geo = MagicMock()
         mock_geo.L = 8
-        mock_summary = _mock_summary()
+        mock_summary = _mock_summary(converged=True)
 
         with (
             patch.object(run_dmrg, "alice"),
@@ -808,17 +808,17 @@ class TestRunOutputFiles:
         saved_path = mock_summary.save.call_args[0][0]
         assert saved_path.name == "state.ckpt"
 
-    def test_state_ckpt_skipped_when_save_state_false(self, tmp_path):
-        """With `save_state = false` in [output], summary.save must not be called."""
+    def test_state_ckpt_skipped_when_not_converged(self, tmp_path):
+        """When the run does not converge, summary.save must not be called."""
         from intraknot.algorithm import run_dmrg
 
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        _write_config_toml(run_dir, extra='[output]\nsave_state = false\n')
+        _write_config_toml(run_dir)
 
         mock_geo = MagicMock()
         mock_geo.L = 8
-        mock_summary = _mock_summary()
+        mock_summary = _mock_summary(converged=False)
 
         with (
             patch.object(run_dmrg, "alice"),
@@ -835,9 +835,89 @@ class TestRunOutputFiles:
             mock_opts.n_sweeps = 2
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = mock_summary
-            run_dmrg.run(run_dir)
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
 
         mock_summary.save.assert_not_called()
+
+    def test_not_converged_keeps_dmrg_ckpt(self, tmp_path):
+        """A not-converged run must not delete the dmrg.ckpt Alice wrote."""
+        from intraknot.algorithm import run_dmrg
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        mock_summary = _mock_summary(converged=False)
+
+        def _fake_dmrg_run(mps, mpo, opts):
+            # Mimic Alice writing dmrg.ckpt into opts.checkpoint_dir mid-run.
+            Path(opts.checkpoint_dir, "dmrg.ckpt").write_bytes(b"fake-checkpoint")
+            return mock_summary
+
+        with (
+            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "load_space", return_value=(MagicMock(), {})),
+            patch.object(run_dmrg, "init_mps", return_value=MagicMock()),
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status"),
+        ):
+            ml.INFO = 20
+            mock_opts = MagicMock()
+            mock_opts.n_sweeps = 2
+            mock_dmrg_mod.Options.from_toml.return_value = mock_opts
+            mock_dmrg_mod.run.side_effect = _fake_dmrg_run
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
+
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        assert (attempt_dir / "dmrg.ckpt").exists()
+        mock_summary.save.assert_not_called()
+
+    def test_converged_removes_dmrg_ckpt(self, tmp_path):
+        """On convergence, the dmrg.ckpt/dmrg_lock.ckpt Alice wrote is removed."""
+        from intraknot.algorithm import run_dmrg
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        mock_summary = _mock_summary(converged=True)
+
+        def _fake_dmrg_run(mps, mpo, opts):
+            # Mimic Alice writing dmrg.ckpt (and its atomic-rename staging
+            # file) into opts.checkpoint_dir mid-run.
+            Path(opts.checkpoint_dir, "dmrg.ckpt").write_bytes(b"fake-checkpoint")
+            Path(opts.checkpoint_dir, "dmrg_lock.ckpt").write_bytes(b"fake-lock")
+            return mock_summary
+
+        with (
+            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "load_space", return_value=(MagicMock(), {})),
+            patch.object(run_dmrg, "init_mps", return_value=MagicMock()),
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status"),
+        ):
+            ml.INFO = 20
+            mock_opts = MagicMock()
+            mock_opts.n_sweeps = 2
+            mock_dmrg_mod.Options.from_toml.return_value = mock_opts
+            mock_dmrg_mod.run.side_effect = _fake_dmrg_run
+            run_dmrg.run(run_dir)
+
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        assert not (attempt_dir / "dmrg.ckpt").exists()
+        assert not (attempt_dir / "dmrg_lock.ckpt").exists()
 
 
 # ---------------------------------------------------------------------------
