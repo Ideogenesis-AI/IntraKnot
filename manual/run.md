@@ -169,6 +169,20 @@ init         = "ckpt"
 # init_ckpt  = "/path/to/some/other/run/state.ckpt"
 ```
 
+#### XTRG cooling schedule and resumption
+
+XTRG has no `init` key: every fresh attempt builds `ρ(τ₀)` from `[algorithm] tau_0` via a Taylor expansion and cools it for a fixed `n_steps` doubling steps to `β_max = 2^n_steps × τ₀`. Because the schedule length is fixed rather than convergence-driven, resumption is automatic rather than configured — `run_xtrg.py` always checks for it, with no `init = "resume"` equivalent to opt into.
+
+When `iknot run resume` creates a new attempt, the runner looks across **all** prior attempt directories (not just the immediately preceding one) for the most recent `progress.ckpt`. If found, it loads that density-matrix snapshot and its accompanying `thermal.ckpt` (β / log Z / discarded-weight history) and continues squaring from the recorded step, instead of rebuilding `ρ(τ₀)` from scratch. If no prior `progress.ckpt` exists (e.g. the first attempt, or a prior attempt completed successfully and its `progress.ckpt` was removed), the schedule starts fresh at step 0.
+
+```
+runs/<RUN_ID>/main/attempts/
+├── attempt_01/
+│   ├── progress.ckpt   # latest rho snapshot; deleted on successful completion
+│   └── thermal.ckpt    # beta / log Z / discarded-weight history so far
+└── attempt_02/          # resumes attempt_01 automatically if it left a progress.ckpt
+```
+
 #### Custom physics via `[plugin]`
 
 The `[plugin]` section lets you replace any of Alice's four built-in pipeline stages with a callable loaded from an external Python file. This is Alice's extension mechanism for non-standard lattice geometries, interaction maps, physical spaces, or Hamiltonians.
