@@ -75,7 +75,7 @@ Files are listed in the following order:
 
 | File | Location |
 |---|---|
-| `info.json` | `main/current/info.json` — DMRG observables written by Alice at the end of a sweep. |
+| `info.json` | `main/current/info.json` — observables written by Alice at the end of the run (energy/convergence for DMRG, finished-schedule status for XTRG). |
 | `iknot.log` | `main/current/iknot.log` — combined `INFO`-level log from IntraKnot and Alice. |
 | `alice.log` | `main/current/alice.log` — `DEBUG`-level Alice output (verbose, timestamped). |
 | `status.json` | `main/status.json` — run state machine status. |
