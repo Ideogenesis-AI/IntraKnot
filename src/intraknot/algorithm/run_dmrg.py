@@ -63,6 +63,18 @@ recent prior attempt and passes `summary.state` to `dmrg.run` as the initial
 MPS; the remaining sweep budget is reduced by `summary.n_sweeps` so the total
 sweep count stays consistent with the original target.
 
+`dmrg.ckpt` and `state.ckpt` are mutually exclusive by the time an attempt
+finishes, so the two never coexist as duplicate copies of the same MPS: on
+genuine convergence, IntraKnot writes `state.ckpt` (via `summary.save`) and
+deletes `dmrg.ckpt`/`dmrg_lock.ckpt`, since `is_resumable()` never revisits a
+completed attempt and Alice's own checkpoint would otherwise linger forever
+with no further purpose. If the sweep budget is exhausted without
+converging, `state.ckpt` is not written at all — `dmrg.ckpt` remains as the
+live checkpoint the next attempt's resume will load. Note that `dmrg.ckpt`'s
+own `converged` field is hardcoded `False` by Alice (written before the
+convergence check runs each sweep), so it is never a reliable source for
+that flag while an attempt is still in progress; `info.json` is.
+
 Outputs (written to `main/attempts/attempt_NN/`)
 ------------------------------------------------
 alice.log
@@ -72,10 +84,11 @@ iknot.log
     log propagation to the root logger).
 dmrg.ckpt
     PyTorch checkpoint written by Alice after every sweep (atomic rename from
-    `dmrg_lock.ckpt`). Loadable via `dmrg.Summary.load`.
+    `dmrg_lock.ckpt`), loadable via `dmrg.Summary.load`. Present only while
+    the attempt has not yet converged; removed once `state.ckpt` is written.
 state.ckpt
-    Final canonical state file; written by IntraKnot on successful
-    completion using `summary.save`.
+    Final canonical state file; written by IntraKnot only once the run
+    converges, using `summary.save`. Supersedes and replaces `dmrg.ckpt`.
 info.json
     Key scalar results: energy, energy_per_site, converged, n_sweeps,
     max_bond_dim.
@@ -541,7 +554,6 @@ def run(run_dir: Path) -> None:
         "plugin":   cfg.get("plugin", {}),
     }
     cfg_algo = cfg.get("algorithm", {})
-    cfg_output = cfg.get("output", {})
 
     # Resolve attempt directory and announce intent.
     attempt_dir, attempt_name = _resolve_attempt_dir(run_dir)
@@ -636,22 +648,32 @@ def run(run_dir: Path) -> None:
         summary = dmrg.run(mps, mpo, opts)
         # dmrg.ckpt is already written by Alice into attempt_dir after each sweep.
 
-        # Save final canonical state.
-        if cfg_output.get("save_state", True):
-            state_path = attempt_dir / "state.ckpt"
-            summary.save(state_path)
-            logger.info("Saved final state: %s", state_path)
-
         # Write observables and convergence table.
         _write_observables(attempt_dir, summary, L)
         _write_convergence(attempt_dir, summary)
 
         # Determine final status.
         if summary.converged:
+            # Genuine completion: promote the converged state to a stable,
+            # correctly-labeled file and remove Alice's per-sweep checkpoint,
+            # which would otherwise duplicate it forever. dmrg.ckpt's own
+            # `converged` field is hardcoded False by Alice's
+            # _save_checkpoint (written before the convergence check runs),
+            # so state.ckpt is the only accurate on-disk record of
+            # convergence, not just a copy.
+            state_path = attempt_dir / "state.ckpt"
+            summary.save(state_path)
+            logger.info("Saved final state: %s", state_path)
+            for stale_name in ("dmrg.ckpt", "dmrg_lock.ckpt"):
+                (attempt_dir / stale_name).unlink(missing_ok=True)
+
             end_state = RunState.COMPLETED
             end_reason = FailureReason.CONVERGED
             restartable = False
         else:
+            # Not converged: dmrg.ckpt is still the live checkpoint the next
+            # attempt's resume will load, so leave it in place and do not
+            # write a second, immediately-stale copy as state.ckpt.
             end_state = RunState.FAILED
             end_reason = FailureReason.NOT_CONVERGED
             restartable = True
