@@ -110,7 +110,7 @@ A campaign records which runs belong together and why. Each campaign carries a `
 ```
 campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: campaign_id, description, algorithm, created_at
-├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
+├── defaults.toml       # TOML: default [algorithm] for all runs
 ├── slurm.toml          # TOML: Slurm defaults for all runs (copied from configs/)
 ├── runs.csv            # CSV: run registry (run_id, scan_id)
 ├── submit_array.slurm  # optional Slurm array script
@@ -123,7 +123,7 @@ campaigns/heisenberg_dmrg_chi_scan/
 
 Every bundled runner is copied into each campaign, because the engine that executes a run is chosen per run by `[algorithm] engine` in its `config.toml`. The `--algorithm` flag on `iknot campaign create` therefore only selects which engine's defaults seed `defaults.toml`; it does not restrict the campaign to one algorithm.
 
-`defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
+`defaults.toml` is generated with all three sections — `[geometry]`, `[model]`, and `[algorithm]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
 `runs.csv` is the run registry for the campaign, with two columns:
 
@@ -143,7 +143,7 @@ A run is one simulation case, typically one parameter point. It carries its own 
 ```
 runs/heis_L64_chi128_g1.0/
 ├── manifest.yaml        # YAML: run_id, campaign, algorithm, status, created_at, machine
-├── config.toml          # TOML: physics-only config (geometry, model, algorithm, output)
+├── config.toml          # TOML: physics-only config (geometry, model, algorithm)
 ├── slurm.toml           # TOML: Slurm resources (copied from campaign; edit before submit)
 ├── algorithm/
 │   ├── run_dmrg.py      # runners, copied from campaign/algorithm/
@@ -159,8 +159,8 @@ runs/heis_L64_chi128_g1.0/
 │       └── attempt_01/
 │           ├── alice.log        # Alice logging output (DEBUG+, timestamped)
 │           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
-│           ├── dmrg.ckpt        # DMRG: per-sweep checkpoint written by Alice
-│           ├── state.ckpt       # DMRG: final MPS state (torch.save)
+│           ├── dmrg.ckpt        # DMRG: per-sweep checkpoint (removed once converged)
+│           ├── state.ckpt       # DMRG: final MPS state, written only on convergence
 │           ├── progress.ckpt    # XTRG: latest rho snapshot (deleted on completion)
 │           ├── thermal.ckpt     # XTRG: beta / log Z / discarded-weight history
 │           ├── info.json
@@ -179,7 +179,7 @@ runs/heis_L64_chi128_g1.0/
 
 ### Run scientific config (`config.toml`)
 
-Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding `[algorithm]` and `[output]` sections. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
+Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding an `[algorithm]` section. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
 
 `[algorithm] engine` selects the algorithm: the submit script invokes `algorithm/run_<engine>.py`, and each runner refuses a config naming a different engine. Runs in one campaign — even in one array job — may use different engines.
 
@@ -205,14 +205,9 @@ n_sweeps     = 20
 e_tol        = 1.0e-8
 trunc_thresh = 1.0e-15
 init         = "product"   # "product", "random", "resume", or "ckpt"
-
-[output]
-save_state      = true
-save_checkpoint = true
-observables     = ["energy", "entropy"]
 ```
 
-When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[geometry]`, `[model]`, `[algorithm]`, and `[output]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
+When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[geometry]`, `[model]`, and `[algorithm]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
 
 ### Status model
 
