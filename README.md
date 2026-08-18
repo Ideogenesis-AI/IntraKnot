@@ -15,12 +15,12 @@ The key rule is: **same scientific definition → new attempt; changed scientifi
 ```
 campaign   a scientific group or parameter study
 run        one simulation case, usually one parameter point
-main       the primary calculation of a run (e.g. DMRG ground-state search)
+main       the primary calculation of a run (e.g. DMRG ground-state search, XTRG cooling schedule)
 attempt    one execution try of main; new attempts are created on failure
 exec job   a follow-up computation on a completed run (measurements, analysis, etc.)
 ```
 
-Most calculations follow the simple path `campaign → run → main → attempt`. Once a ground state is obtained, any number of exec jobs (bespoke Python scripts) can be run against it under the `exec/` directory of the run.
+Most calculations follow the simple path `campaign → run → main → attempt`. Once `main` completes, any number of exec jobs (bespoke Python scripts) can be run against its output under the `exec/` directory of the run.
 
 ## Repository layout
 
@@ -159,8 +159,10 @@ runs/heis_L64_chi128_g1.0/
 │       └── attempt_01/
 │           ├── alice.log        # Alice logging output (DEBUG+, timestamped)
 │           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
-│           ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
-│           ├── state.ckpt       # final MPS state (torch.save)
+│           ├── dmrg.ckpt        # DMRG: per-sweep checkpoint written by Alice
+│           ├── state.ckpt       # DMRG: final MPS state (torch.save)
+│           ├── progress.ckpt    # XTRG: latest rho snapshot (deleted on completion)
+│           ├── thermal.ckpt     # XTRG: beta / log Z / discarded-weight history
 │           ├── info.json
 │           ├── conv.csv
 │           └── status.json
@@ -230,7 +232,8 @@ Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan
 | Situation | Action |
 |---|---|
 | Timeout, OOM, node failure, preemption | New attempt in the same `main/` |
-| Not converged — more sweeps needed | New attempt (resumes from last checkpoint) |
+| Not converged — more sweeps needed (DMRG) | New attempt (resumes from last checkpoint) |
+| Not finished — schedule interrupted (XTRG) | New attempt (resumes from last checkpoint) |
 | Changed Hamiltonian, lattice size, bond dimension, algorithm | New run in the same campaign |
 | Bug fix that changes scientific results | New run |
 | Wrong `config.toml` | Mark run as `invalid`; create corrected run |
@@ -318,7 +321,7 @@ iknot resume campaign --id heisenberg_dmrg_chi_scan
 iknot status heis_L64_chi128_g1.0
 ```
 
-Prints primary job state, current attempt, energy and convergence, and a summary line for each exec job slot found under `exec/`.
+Prints primary job state, current attempt, and engine-specific observables (energy and convergence for DMRG, finished-schedule status for XTRG), plus a summary line for each exec job slot found under `exec/`.
 
 ### Monitor campaigns (TUI)
 
