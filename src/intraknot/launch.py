@@ -684,9 +684,6 @@ def _defaults_toml_text(algorithm: str) -> str:
         "label    = \"_init_\"\n"
         "symmetry = \"_init_\"\n\n"
         f"{block}\n"
-        "[output]\n"
-        "save_state      = true\n"
-        "observables     = [\"energy\", \"entropy\"]\n"
     )
 
 
