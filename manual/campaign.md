@@ -65,7 +65,7 @@ campaigns/<CAMPAIGN_ID>/
 
 All bundled runners are installed because each run picks its engine through `[algorithm] engine` in its own `config.toml`; `--algorithm` only decides which engine's parameter block seeds `defaults.toml`. A campaign can therefore hold DMRG and XTRG runs side by side.
 
-`**defaults.toml**` is the campaign's baseline scientific configuration. It is an Alice-compatible TOML file with up to four sections: `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. When a run is created with `iknot run create`, the campaign's `defaults.toml` is merged with any per-run overrides to produce the run's `config.toml`. Edit `defaults.toml` after creating the campaign and before creating any runs to set the shared parameters for the whole parameter study.
+`**defaults.toml**` is the campaign's baseline scientific configuration. It is an Alice-compatible TOML file with up to three sections: `[geometry]`, `[model]`, and `[algorithm]`. When a run is created with `iknot run create`, the campaign's `defaults.toml` is merged with any per-run overrides to produce the run's `config.toml`. Edit `defaults.toml` after creating the campaign and before creating any runs to set the shared parameters for the whole parameter study.
 
 `**slurm.toml**` is a verbatim copy of `configs/slurm.toml` at the time the campaign is created. Edit it here to set campaign-wide Slurm settings (e.g. partition, walltime suited to the expected bond dimension).
 
