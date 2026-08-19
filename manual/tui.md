@@ -15,10 +15,10 @@ The dashboard opens on the active campaign (resolved from `INTRAKNOT_CAMPAIGN` o
 ## Layout
 
 ```
-╔═ heisenberg_dmrg_chi_scan  —  6 run(s) ═════════════════════════ page 1/2 ╗
-║  run_id                         scan         state     conv  sweeps  bond ║
-║  dmrg_heis_lx64_chi128_a3f7b2…  chi_study    ✓ done    yes    100    128  ║
-║  dmrg_heis_lx64_chi256_c91d4e…  chi_study    ✓ done    yes    120    256  ║
+╔═ heisenberg_dmrg_chi_scan — 6 run(s) ══════════════════════════ page 1/2 ═╗
+║  run_id                         scan         state     iters  bond        ║
+║  dmrg_heis_lx64_chi128_a3f7b2…  chi_study    ✓ done    100    128         ║
+║  dmrg_heis_lx64_chi256_c91d4e…  chi_study    ✓ done    120    256         ║
 ║  …                                                                        ║
 ╠═══════════════════════════════════════════════════════════════════════════╣
 ║  ┌── state: done · reason: converged · attempt: 01 · restartable: no ──┐  ║
@@ -75,7 +75,7 @@ Files are listed in the following order:
 
 | File | Location |
 |---|---|
-| `info.json` | `main/current/info.json` — DMRG observables written by Alice at the end of a sweep. |
+| `info.json` | `main/current/info.json` — observables written by Alice at the end of the run (energy/convergence for DMRG, finished-schedule status for XTRG). |
 | `iknot.log` | `main/current/iknot.log` — combined `INFO`-level log from IntraKnot and Alice. |
 | `alice.log` | `main/current/alice.log` — `DEBUG`-level Alice output (verbose, timestamped). |
 | `status.json` | `main/status.json` — run state machine status. |
@@ -89,9 +89,8 @@ Files are listed in the following order:
 | `run_id` | `runs.csv` | Truncated if long. |
 | `scan` | `runs.csv` | Scan identifier; `—` if not part of a scan. |
 | `state` | `main/status.json` | Color-coded with a state icon: ○ pending, ● running, ✓ done, ✗ failed. |
-| `conv` | `summary/info.json` | Convergence flag (`yes` / `no` / `—`). |
-| `sweeps` | `summary/info.json` | Number of DMRG sweeps completed. |
-| `bond` | `summary/info.json` | Peak bond dimension reached. |
+| `iters` | `main/current/info.json` | Number of optimization/cooling steps completed (`n_sweeps` for DMRG, `n_steps` for XTRG). |
+| `bond` | `main/current/info.json` | Peak bond dimension reached. |
 
 ### Detail pane
 

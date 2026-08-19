@@ -19,6 +19,7 @@
 """Tests for src/intraknot/launch.py."""
 
 import csv
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,6 +30,8 @@ import yaml
 
 from intraknot.alg_lock import AlgorithmLock
 from intraknot.launch import (
+    _ENGINE_LOOKUP_SNIPPET,
+    _bundled_algorithms,
     _dump_toml,
     _find_exec_script,
     _register_run_in_campaign,
@@ -129,6 +132,20 @@ def _write_slurm_toml(run_dir: Path, **overrides) -> None:
     (run_dir / "slurm.toml").write_text(content)
 
 
+def _stub_runner(run_dir: Path, engine: str = "dmrg") -> None:
+    """Create `algorithm/run_<engine>.py` so submit-script writers accept the run."""
+    alg_dir = run_dir / "algorithm"
+    alg_dir.mkdir(parents=True, exist_ok=True)
+    (alg_dir / f"run_{engine}.py").write_text("# stub\n")
+
+
+def _write_engine_config(run_dir: Path, engine: str) -> None:
+    """Write a `config.toml` selecting `engine` in its `[algorithm]` section."""
+    (run_dir / "config.toml").write_text(
+        f'[algorithm]\nengine = "{engine}"\n'
+    )
+
+
 def _minimal_config_toml(tmp_path: Path) -> Path:
     p = tmp_path / "config.toml"
     p.write_text(
@@ -154,6 +171,33 @@ class TestCreateCampaign:
         assert (camp_dir / "runs.csv").exists()
         assert (camp_dir / "notes.md").exists()
         assert (camp_dir / "algorithm" / "run_dmrg.py").exists()
+
+    def test_copies_every_bundled_runner(self, tmp_path):
+        """Engine selection happens per run, so all runners must be available."""
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        for algorithm in _bundled_algorithms():
+            assert (camp_dir / "algorithm" / f"run_{algorithm}.py").exists()
+        assert (camp_dir / "algorithm" / "run_xtrg.py").exists()
+
+    def test_defaults_toml_uses_requested_engine(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "xtrg", campaigns_root)
+        text = (camp_dir / "defaults.toml").read_text()
+        assert 'engine        = "xtrg"' in text
+        assert "n_steps" in text
+        assert "e_tol" not in text
+
+    def test_unknown_algorithm_rejected(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        with pytest.raises(ValueError, match="nonexistent"):
+            create_campaign("c1", "", "nonexistent", campaigns_root)
+        assert not (campaigns_root / "c1").exists(), (
+            "a rejected algorithm must not leave a partial campaign behind"
+        )
 
     def test_creates_slurm_toml(self, tmp_path):
         campaigns_root = tmp_path / "campaigns"
@@ -246,6 +290,17 @@ class TestCreateRunManifest:
         assert manifest["run_id"] == "run01"
         assert manifest["algorithm"] == "dmrg"
         assert "created_at" in manifest
+
+    def test_manifest_algorithm_follows_config_engine(self, tmp_path):
+        """The engine in config.toml wins over the campaign's seed algorithm."""
+        campaigns_root, runs_root = self._setup(tmp_path)
+        run_dir = create_run(
+            "run_xtrg", "mycampaign", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+            overrides={"algorithm": {"engine": "xtrg"}},
+        )
+        manifest = yaml.safe_load((run_dir / "manifest.yaml").read_text())
+        assert manifest["algorithm"] == "xtrg"
 
     def test_manifest_has_uuid(self, tmp_path):
         import uuid
@@ -354,6 +409,7 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         machine = _make_machine()
         script = write_slurm_script(run_dir, machine, "run01")
         assert script == run_dir / "main" / "submit.slurm"
@@ -363,6 +419,7 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         machine = _make_machine()
         script = write_slurm_script(run_dir, machine, "run01")
         text = script.read_text()
@@ -376,6 +433,7 @@ class TestWriteSlurmScript:
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir, account="testproject", partition="cpu",
                           time="02:00:00")
+        _stub_runner(run_dir)
         machine = _make_machine()
         script = write_slurm_script(run_dir, machine)
         text = script.read_text()
@@ -387,6 +445,7 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         run_dir.mkdir()
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         machine = _make_machine()
         write_slurm_script(run_dir, machine, "run01")
         assert (run_dir / "main" / "logs").is_dir()
@@ -395,6 +454,7 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         text = write_slurm_script(run_dir, _make_machine(), "run01").read_text()
         assert "--error=" in text
         assert "slurm-%j.err" in text
@@ -403,12 +463,14 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir)  # constraint not set → ""
+        _stub_runner(run_dir)
         text = write_slurm_script(run_dir, _make_machine(), "run01").read_text()
         assert "--constraint" not in text
 
     def test_includes_constraint_when_set(self, tmp_path):
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
+        _stub_runner(run_dir)
         (run_dir / "slurm.toml").write_text(
             '[basic]\naccount = "proj"\n'
             '[main]\npartition = "cpu"\nconstraint = "x86-64-v4&fast-io"\n'
@@ -424,6 +486,7 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         run_dir.mkdir()
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         write_slurm_script(run_dir, _make_machine(), "run01")
         assert not (run_dir / "submit").exists()
 
@@ -431,9 +494,38 @@ class TestWriteSlurmScript:
         run_dir = tmp_path / "run01"
         (run_dir / "main" / "logs").mkdir(parents=True)
         _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
         machine = MachineConfig(paths=PathsConfig(command="uv run", scratch_node="/scratch/$USER"))
         text = write_slurm_script(run_dir, machine, "run01").read_text()
         assert 'export YUZUHA_CACHE_PATH="/scratch/$USER/.yuzuha"' in text
+
+    def test_defaults_to_dmrg_runner(self, tmp_path):
+        run_dir = tmp_path / "run01"
+        (run_dir / "main" / "logs").mkdir(parents=True)
+        _write_slurm_toml(run_dir)
+        _stub_runner(run_dir)
+        text = write_slurm_script(run_dir, _make_machine(), "run01").read_text()
+        assert "algorithm/run_dmrg.py" in text
+
+    def test_uses_engine_from_config_toml(self, tmp_path):
+        run_dir = tmp_path / "run01"
+        (run_dir / "main" / "logs").mkdir(parents=True)
+        _write_slurm_toml(run_dir)
+        _write_engine_config(run_dir, "xtrg")
+        _stub_runner(run_dir, "xtrg")
+        text = write_slurm_script(run_dir, _make_machine(), "run01").read_text()
+        assert "algorithm/run_xtrg.py" in text
+        assert "run_dmrg.py" not in text
+        assert "Starting XTRG run" in text
+
+    def test_raises_when_runner_for_engine_missing(self, tmp_path):
+        run_dir = tmp_path / "run01"
+        (run_dir / "main" / "logs").mkdir(parents=True)
+        _write_slurm_toml(run_dir)
+        _write_engine_config(run_dir, "nonexistent")
+        _stub_runner(run_dir)
+        with pytest.raises(FileNotFoundError, match="nonexistent"):
+            write_slurm_script(run_dir, _make_machine(), "run01")
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +890,63 @@ class TestWriteArraySlurmScript:
         assert "NR-1==id" in text
         assert "print $1" in text
 
+    def test_script_resolves_engine_per_task(self, tmp_path):
+        """Runs in one array may use different engines, so ENGINE is resolved
+        from each run's config.toml at job time rather than being baked in."""
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+
+        script = write_array_slurm_script(camp_dir, runs_root, _make_machine(), "1-3")
+        text = script.read_text()
+
+        assert 'sec=="[algorithm]"' in text
+        assert '"$RUN_DIR/config.toml"' in text
+        assert 'algorithm/run_$ENGINE.py' in text
+        assert "run_dmrg.py" not in text
+
+
+# ---------------------------------------------------------------------------
+# _ENGINE_LOOKUP_SNIPPET
+# ---------------------------------------------------------------------------
+
+class TestEngineLookupSnippet:
+    """The array script parses config.toml in shell, so exercise it for real."""
+
+    def _resolve(self, run_dir: Path) -> str:
+        import subprocess
+        proc = subprocess.run(
+            ["bash", "-c", _ENGINE_LOOKUP_SNIPPET + 'echo "$ENGINE"'],
+            capture_output=True, text=True, check=True,
+            env={"RUN_DIR": str(run_dir), "PATH": os.environ.get("PATH", "")},
+        )
+        return proc.stdout.strip()
+
+    def test_reads_engine_from_algorithm_section(self, tmp_path):
+        _write_engine_config(tmp_path, "xtrg")
+        assert self._resolve(tmp_path) == "xtrg"
+
+    def test_ignores_engine_key_in_other_sections(self, tmp_path):
+        (tmp_path / "config.toml").write_text(
+            '[output]\nengine = "wrong"\n\n[algorithm]\nengine = "xtrg"\n'
+        )
+        assert self._resolve(tmp_path) == "xtrg"
+
+    def test_defaults_to_dmrg_when_key_absent(self, tmp_path):
+        (tmp_path / "config.toml").write_text('[algorithm]\nmax_bond = 32\n')
+        assert self._resolve(tmp_path) == "dmrg"
+
+    def test_matches_generated_run_config(self, tmp_path):
+        """The snippet must handle the exact layout that create_run writes."""
+        campaigns_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        create_campaign("c1", "", "xtrg", campaigns_root)
+        run_dir = create_run(
+            "run01", "c1", None,
+            runs_root=runs_root, campaigns_root=campaigns_root,
+        )
+        assert self._resolve(run_dir) == "xtrg"
+
     def test_exports_yuzuha_cache_path(self, tmp_path):
         campaigns_root = tmp_path / "campaigns"
         runs_root = tmp_path / "runs"
@@ -828,6 +977,14 @@ class TestCreateCampaignAlgorithmLock:
         assert lock.is_managed("run_dmrg.py"), (
             "run_dmrg.py should be a managed entry in algorithm.lock"
         )
+
+    def test_lock_has_managed_entry_for_every_runner(self, tmp_path):
+        campaigns_root = tmp_path / "campaigns"
+        campaigns_root.mkdir()
+        camp_dir = create_campaign("c1", "", "dmrg", campaigns_root)
+        lock = AlgorithmLock.load(camp_dir / "algorithm" / "algorithm.lock")
+        for algorithm in _bundled_algorithms():
+            assert lock.is_managed(f"run_{algorithm}.py")
 
     def test_lock_entry_has_intraknot_source(self, tmp_path):
         campaigns_root = tmp_path / "campaigns"

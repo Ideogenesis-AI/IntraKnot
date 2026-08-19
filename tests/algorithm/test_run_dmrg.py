@@ -109,7 +109,7 @@ def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
     mock_geo.L = 8
 
     with (
-        patch.object(run_dmrg, "alice"),
+        patch.object(run_dmrg, "alice") as mock_alice,
         # Suppress FileHandler creation and root-logger mutation; keep
         # logging.INFO as a real int so logger.setLevel() on the module-level
         # real logger doesn't receive a MagicMock.
@@ -121,6 +121,7 @@ def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
         patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
         patch.object(run_dmrg, "write_status"),
     ):
+        mock_alice.__version__ = "0.0.0"
         mock_logging.INFO = 20
         mock_bi.return_value = ([], MagicMock(), mock_geo)
         mock_opts = MagicMock()
@@ -175,48 +176,124 @@ class TestAttemptDirectory:
 
 
 # ---------------------------------------------------------------------------
-# _find_latest_checkpoint
+# _find_resume_checkpoint
 # ---------------------------------------------------------------------------
 
-class TestFindLatestCheckpoint:
-    """Tests for `_find_latest_checkpoint`."""
+class TestFindResumeCheckpoint:
+    """Tests for `_find_resume_checkpoint`."""
 
-    def test_returns_none_when_no_attempts_root(self, tmp_path):
-        from intraknot.algorithm.run_dmrg import _find_latest_checkpoint
-        assert _find_latest_checkpoint(tmp_path) is None
+    def test_returns_none_when_nothing_exists(self, tmp_path):
+        from intraknot.algorithm.run_dmrg import _find_resume_checkpoint
+        assert _find_resume_checkpoint(tmp_path) is None
 
-    def test_returns_none_when_no_ckpt_in_any_attempt(self, tmp_path):
-        from intraknot.algorithm.run_dmrg import _find_latest_checkpoint
-        (tmp_path / "main" / "attempts" / "attempt_01").mkdir(parents=True)
-        assert _find_latest_checkpoint(tmp_path) is None
+    def test_returns_live_dmrg_ckpt_when_present(self, tmp_path):
+        from intraknot.algorithm.run_dmrg import _find_resume_checkpoint
+        main = tmp_path / "main"
+        main.mkdir(parents=True)
+        (main / "dmrg.ckpt").write_bytes(b"live")
+        assert _find_resume_checkpoint(tmp_path) == main / "dmrg.ckpt"
 
-    def test_returns_ckpt_from_single_attempt(self, tmp_path):
-        from intraknot.algorithm.run_dmrg import _find_latest_checkpoint
-        a1 = tmp_path / "main" / "attempts" / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "dmrg.ckpt").write_bytes(b"")
-        assert _find_latest_checkpoint(tmp_path) == a1 / "dmrg.ckpt"
+    def test_returns_archived_state_when_not_converged(self, tmp_path):
+        from intraknot.algorithm import run_dmrg
+        from intraknot.algorithm.run_dmrg import _find_resume_checkpoint
 
-    def test_prefers_later_attempt_over_earlier(self, tmp_path):
-        from intraknot.algorithm.run_dmrg import _find_latest_checkpoint
-        root = tmp_path / "main" / "attempts"
-        a1 = root / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "dmrg.ckpt").write_bytes(b"old")
-        a2 = root / "attempt_02"
-        a2.mkdir()
-        (a2 / "dmrg.ckpt").write_bytes(b"new")
-        assert _find_latest_checkpoint(tmp_path) == a2 / "dmrg.ckpt"
+        artifacts = tmp_path / "main" / "artifacts"
+        artifacts.mkdir(parents=True)
+        (artifacts / "state.ckpt").write_bytes(b"archived")
 
-    def test_skips_attempt_without_ckpt(self, tmp_path):
-        """Returns the most recent attempt that *has* a checkpoint."""
-        from intraknot.algorithm.run_dmrg import _find_latest_checkpoint
-        root = tmp_path / "main" / "attempts"
-        a1 = root / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "dmrg.ckpt").write_bytes(b"")
-        (root / "attempt_02").mkdir()  # no ckpt
-        assert _find_latest_checkpoint(tmp_path) == a1 / "dmrg.ckpt"
+        mock_summary = MagicMock()
+        mock_summary.converged = False
+        with patch.object(run_dmrg, "dmrg") as mock_dmrg:
+            mock_dmrg.Summary.load.return_value = mock_summary
+            result = _find_resume_checkpoint(tmp_path)
+
+        assert result == artifacts / "state.ckpt"
+
+    def test_returns_none_when_archived_state_converged(self, tmp_path):
+        """A converged archive means the run is done; nothing to resume."""
+        from intraknot.algorithm import run_dmrg
+        from intraknot.algorithm.run_dmrg import _find_resume_checkpoint
+
+        artifacts = tmp_path / "main" / "artifacts"
+        artifacts.mkdir(parents=True)
+        (artifacts / "state.ckpt").write_bytes(b"archived")
+
+        mock_summary = MagicMock()
+        mock_summary.converged = True
+        with patch.object(run_dmrg, "dmrg") as mock_dmrg:
+            mock_dmrg.Summary.load.return_value = mock_summary
+            result = _find_resume_checkpoint(tmp_path)
+
+        assert result is None
+
+    def test_prefers_live_ckpt_over_archived(self, tmp_path):
+        """A live dmrg.ckpt (crash mid-sweep) always wins over an archive."""
+        from intraknot.algorithm.run_dmrg import _find_resume_checkpoint
+
+        main = tmp_path / "main"
+        (main / "artifacts").mkdir(parents=True)
+        (main / "dmrg.ckpt").write_bytes(b"live")
+        (main / "artifacts" / "state.ckpt").write_bytes(b"archived")
+
+        assert _find_resume_checkpoint(tmp_path) == main / "dmrg.ckpt"
+
+
+# ---------------------------------------------------------------------------
+# _validate_config
+# ---------------------------------------------------------------------------
+
+class TestValidateConfig:
+    """Tests for `_validate_config`.
+
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    this runner must refuse a config that selects a different engine.
+    """
+
+    def test_accepts_dmrg_engine(self):
+        from intraknot.algorithm.run_dmrg import _validate_config
+        _validate_config({"engine": "dmrg"})
+
+    def test_defaults_to_dmrg(self):
+        from intraknot.algorithm.run_dmrg import _validate_config
+        _validate_config({})
+
+    def test_rejects_other_engine(self):
+        from intraknot.algorithm.run_dmrg import _EngineMismatch, _validate_config
+        with pytest.raises(_EngineMismatch, match="engine"):
+            _validate_config({"engine": "xtrg"})
+
+    def test_run_marks_engine_mismatch_invalid(self, tmp_path):
+        """A mis-dispatched run must not be retried with the same config."""
+        from intraknot.algorithm import run_dmrg
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir, extra='engine = "xtrg"\n')
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        calls: list = []
+
+        with (
+            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction",
+                         return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status",
+                         side_effect=lambda p, s: calls.append((p, s))),
+        ):
+            ml.INFO = 20
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
+
+        mock_dmrg_mod.run.assert_not_called()
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
 
 
 # ---------------------------------------------------------------------------
@@ -236,28 +313,46 @@ class TestWriteObservables:
 
     def test_creates_info_json(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_observables
-        _write_observables(tmp_path, self._summary(), L=8)
+        _write_observables(tmp_path, self._summary(), L=8, sweeps_done=0)
         assert (tmp_path / "info.json").exists()
 
     def test_energy_fields(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_observables
-        _write_observables(tmp_path, self._summary(), L=8)
+        _write_observables(tmp_path, self._summary(), L=8, sweeps_done=0)
         data = json.loads((tmp_path / "info.json").read_text())
         assert data["energy"] == pytest.approx(-7.0)
         assert data["energy_per_site"] == pytest.approx(-7.0 / 8)
 
     def test_scalar_fields(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_observables
-        _write_observables(tmp_path, self._summary(), L=8)
+        _write_observables(tmp_path, self._summary(), L=8, sweeps_done=0)
         data = json.loads((tmp_path / "info.json").read_text())
         assert data["converged"] is True
         assert data["n_sweeps"] == 4
         assert data["max_bond_dim"] == 8
         assert data["bond_dims"] == [2, 4, 8, 4, 2]
 
+    def test_metadata_fields(self, tmp_path):
+        from intraknot.algorithm import run_dmrg
+        from intraknot.algorithm.run_dmrg import _write_observables
+        with patch.object(run_dmrg, "alice") as mock_alice:
+            mock_alice.__version__ = "9.9.9"
+            _write_observables(tmp_path, self._summary(), L=8, sweeps_done=0)
+        data = json.loads((tmp_path / "info.json").read_text())
+        assert data["algorithm"] == "dmrg"
+        assert data["alice_version"] == "9.9.9"
+        assert data["system_size"] == 8
+
+    def test_n_sweeps_includes_prior_attempts(self, tmp_path):
+        """`n_sweeps` must report the total across all attempts, not just this one."""
+        from intraknot.algorithm.run_dmrg import _write_observables
+        _write_observables(tmp_path, self._summary(), L=8, sweeps_done=6)
+        data = json.loads((tmp_path / "info.json").read_text())
+        assert data["n_sweeps"] == 6 + 4
+
     def test_nan_energy_per_site_for_zero_length(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_observables
-        _write_observables(tmp_path, self._summary(), L=0)
+        _write_observables(tmp_path, self._summary(), L=0, sweeps_done=0)
         data = json.loads((tmp_path / "info.json").read_text())
         assert math.isnan(data["energy_per_site"])
 
@@ -267,7 +362,12 @@ class TestWriteObservables:
 # ---------------------------------------------------------------------------
 
 class TestWriteConvergence:
-    """Tests for `_write_convergence`."""
+    """Tests for `_write_convergence`.
+
+    `run_dir` must have a `main/` subdirectory already, mirroring how `run()`
+    always creates `main/attempts/` (and therefore `main/`) before calling
+    `_write_convergence`.
+    """
 
     def _summary(self, energies=None, dw=None, converged=True) -> MagicMock:
         s = MagicMock()
@@ -280,50 +380,116 @@ class TestWriteConvergence:
         with open(path, newline="") as f:
             return list(csv.DictReader(f))
 
+    def _run_dir(self, tmp_path: Path) -> Path:
+        run_dir = tmp_path / "run"
+        (run_dir / "main").mkdir(parents=True)
+        return run_dir
+
     def test_creates_conv_csv(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary())
-        assert (tmp_path / "conv.csv").exists()
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(run_dir, self._summary(), sweeps_done=0, resumed_energy=None)
+        assert (run_dir / "main" / "conv.csv").exists()
 
     def test_header_columns(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary())
-        with open(tmp_path / "conv.csv", newline="") as f:
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(run_dir, self._summary(), sweeps_done=0, resumed_energy=None)
+        with open(run_dir / "main" / "conv.csv", newline="") as f:
             header = next(csv.reader(f))
         assert header == ["sweep", "energy", "delta_energy", "discarded_weight", "converged"]
 
     def test_row_count_matches_sweeps(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary())
-        rows = self._read_csv(tmp_path / "conv.csv")
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(run_dir, self._summary(), sweeps_done=0, resumed_energy=None)
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
         assert len(rows) == 3
 
-    def test_first_row_has_nan_delta(self, tmp_path):
+    def test_first_row_has_nan_delta_on_fresh_start(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary())
-        rows = self._read_csv(tmp_path / "conv.csv")
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(run_dir, self._summary(), sweeps_done=0, resumed_energy=None)
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
         assert rows[0]["sweep"] == "1"
         assert rows[0]["delta_energy"] == "nan"
 
     def test_delta_energy_computed_correctly(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary(energies=[-3.0, -3.5]))
-        rows = self._read_csv(tmp_path / "conv.csv")
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(
+            run_dir, self._summary(energies=[-3.0, -3.5]),
+            sweeps_done=0, resumed_energy=None,
+        )
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
         assert float(rows[1]["delta_energy"]) == pytest.approx(0.5)
 
     def test_converged_flag_set_only_on_last_row(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary())
-        rows = self._read_csv(tmp_path / "conv.csv")
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(run_dir, self._summary(), sweeps_done=0, resumed_energy=None)
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
         assert rows[0]["converged"] == "False"
         assert rows[1]["converged"] == "False"
         assert rows[2]["converged"] == "True"
 
     def test_converged_false_on_all_rows_when_not_converged(self, tmp_path):
         from intraknot.algorithm.run_dmrg import _write_convergence
-        _write_convergence(tmp_path, self._summary(converged=False))
-        rows = self._read_csv(tmp_path / "conv.csv")
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(
+            run_dir, self._summary(converged=False),
+            sweeps_done=0, resumed_energy=None,
+        )
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
         assert all(r["converged"] == "False" for r in rows)
+
+    def test_sweep_numbers_offset_by_sweeps_done(self, tmp_path):
+        from intraknot.algorithm.run_dmrg import _write_convergence
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(
+            run_dir, self._summary(energies=[-3.6, -3.7]),
+            sweeps_done=5, resumed_energy=-3.5,
+        )
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
+        assert [r["sweep"] for r in rows] == ["6", "7"]
+
+    def test_resumed_energy_seeds_first_delta(self, tmp_path):
+        """The first row of a resumed attempt gets a real delta, not NaN."""
+        from intraknot.algorithm.run_dmrg import _write_convergence
+        run_dir = self._run_dir(tmp_path)
+        _write_convergence(
+            run_dir, self._summary(energies=[-3.6, -3.7]),
+            sweeps_done=5, resumed_energy=-3.5,
+        )
+        rows = self._read_csv(run_dir / "main" / "conv.csv")
+        assert float(rows[0]["delta_energy"]) == pytest.approx(0.1)
+        assert float(rows[1]["delta_energy"]) == pytest.approx(0.1)
+
+    def test_second_call_appends_without_duplicating_header(self, tmp_path):
+        """Simulates two attempts of the same run: history accumulates in
+        one file with a single header and continuous sweep numbering."""
+        from intraknot.algorithm.run_dmrg import _write_convergence
+        run_dir = self._run_dir(tmp_path)
+
+        _write_convergence(
+            run_dir, self._summary(energies=[-3.0, -3.4, -3.5], converged=False),
+            sweeps_done=0, resumed_energy=None,
+        )
+        _write_convergence(
+            run_dir, self._summary(energies=[-3.6], converged=True),
+            sweeps_done=3, resumed_energy=-3.5,
+        )
+
+        path = run_dir / "main" / "conv.csv"
+        with open(path, newline="") as f:
+            lines = f.read().splitlines()
+        assert lines[0] == "sweep,energy,delta_energy,discarded_weight,converged"
+        assert sum(1 for line in lines[1:] if line) == 4
+
+        rows = self._read_csv(path)
+        assert [r["sweep"] for r in rows] == ["1", "2", "3", "4"]
+        assert rows[-1]["converged"] == "True"
+        assert float(rows[-1]["delta_energy"]) == pytest.approx(0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -368,10 +534,11 @@ class TestInitMps:
                 patch.object(run_dmrg, "load_space", return_value=(MagicMock(), {})),
                 patch.object(run_dmrg, "init_mps", return_value=MagicMock()),
             ):
-                _, sweeps_done = _init_mps(
+                _, sweeps_done, resumed_energy = _init_mps(
                     _CFG_MODEL, {"init": strategy, "max_bond": 4, "seed": 0}, 8, None, tmp_path
                 )
             assert sweeps_done == 0, f"strategy={strategy!r} should return sweeps_done=0"
+            assert resumed_energy is None
 
     def test_target_qn_list_converted_to_tuple(self, tmp_path):
         from intraknot.algorithm import run_dmrg
@@ -418,10 +585,13 @@ class TestInitMps:
 
         with patch.object(run_dmrg, "dmrg") as mock_dmrg:
             mock_dmrg.Summary.load.return_value = mock_source
-            mps, sweeps_done = _init_mps(_CFG_MODEL, {"init": "ckpt"}, 8, None, tmp_path)
+            mps, sweeps_done, resumed_energy = _init_mps(
+                _CFG_MODEL, {"init": "ckpt"}, 8, None, tmp_path
+            )
 
         assert mps is mock_source.state
         assert sweeps_done == 0
+        assert resumed_energy is None
         mock_source.state.canonical.assert_called_once_with(0)
 
     def test_ckpt_uses_explicit_init_ckpt_path(self, tmp_path):
@@ -458,10 +628,13 @@ class TestInitMps:
 
         with patch.object(run_dmrg, "dmrg") as mock_dmrg:
             mock_dmrg.Summary.load.return_value = mock_prev
-            mps, sweeps_done = _init_mps(_CFG_MODEL, {"init": "resume"}, 8, ckpt, tmp_path)
+            mps, sweeps_done, resumed_energy = _init_mps(
+                _CFG_MODEL, {"init": "resume"}, 8, ckpt, tmp_path
+            )
 
         assert mps is mock_prev.state
         assert sweeps_done == 5
+        assert resumed_energy == pytest.approx(-3.5)
         mock_prev.state.canonical.assert_called_once_with(0)
 
     def test_resume_falls_back_to_random_when_no_prior_checkpoint(self, tmp_path):
@@ -473,7 +646,7 @@ class TestInitMps:
             patch.object(run_dmrg, "init_mps") as mock_im,
         ):
             mock_im.return_value = MagicMock()
-            _, sweeps_done = _init_mps(
+            _, sweeps_done, resumed_energy = _init_mps(
                 _CFG_MODEL,
                 {"init": "resume", "max_bond": 16, "seed": 0},
                 8, None, tmp_path,  # prior_checkpoint=None → fall back
@@ -481,6 +654,7 @@ class TestInitMps:
 
         assert mock_im.called, "init_mps should be called for the random fallback"
         assert sweeps_done == 0
+        assert resumed_energy is None
         assert mock_im.call_args.kwargs["bond_dim"] == 16
 
 
@@ -530,14 +704,15 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 10  # original budget
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 3)),
+            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 3, -3.5)),
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -559,14 +734,15 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 2  # budget already exhausted
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 5)),
+            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 5, -3.5)),
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -588,14 +764,15 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 10
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 0)),
+            patch.object(run_dmrg, "_init_mps", return_value=(MagicMock(), 0, None)),
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -620,7 +797,7 @@ class TestRunStatus:
         calls: list = []
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -632,6 +809,7 @@ class TestRunStatus:
                 side_effect=lambda p, s: calls.append((p, s)),
             ),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_opts = MagicMock()
             mock_opts.n_sweeps = 2
@@ -701,7 +879,13 @@ class TestRunStatus:
 # ---------------------------------------------------------------------------
 
 class TestRunOutputFiles:
-    """run() must write info.json, conv.csv, and state.ckpt to the attempt directory."""
+    """run() must write info.json to the attempt dir and conv.csv to main/.
+
+    Checkpoint/artifact lifecycle (writing dmrg.ckpt, archiving state.ckpt,
+    deleting stale files) is entirely Alice's responsibility as of 0.2.5;
+    `dmrg.run` is mocked in these tests, so there is nothing left for
+    IntraKnot's own code to do with those files, and no such tests remain.
+    """
 
     def test_info_json_written(self, tmp_path):
         run_dir = tmp_path / "run"
@@ -710,15 +894,25 @@ class TestRunOutputFiles:
         _run(run_dir)
         assert (run_dir / "main" / "attempts" / "attempt_01" / "info.json").exists()
 
-    def test_conv_csv_written(self, tmp_path):
+    def test_conv_csv_written_to_main(self, tmp_path):
+        """conv.csv lives directly under main/, shared across attempts."""
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         _write_config_toml(run_dir)
         _run(run_dir)
-        assert (run_dir / "main" / "attempts" / "attempt_01" / "conv.csv").exists()
+        assert (run_dir / "main" / "conv.csv").exists()
+        assert not (run_dir / "main" / "attempts" / "attempt_01" / "conv.csv").exists()
 
-    def test_state_ckpt_saved_by_default(self, tmp_path):
-        """With the default `save_state = true`, summary.save is called."""
+
+# ---------------------------------------------------------------------------
+# run() — shared checkpoint_dir / artifacts_dir
+# ---------------------------------------------------------------------------
+
+class TestRunSharedPaths:
+    """`opts.checkpoint_dir` and `opts.artifacts_dir` must point at `main/`,
+    shared across every attempt, not the per-attempt directory."""
+
+    def test_checkpoint_and_artifacts_dir_point_to_main(self, tmp_path):
         from intraknot.algorithm import run_dmrg
 
         run_dir = tmp_path / "run"
@@ -727,10 +921,11 @@ class TestRunOutputFiles:
 
         mock_geo = MagicMock()
         mock_geo.L = 8
-        mock_summary = _mock_summary()
+        mock_opts = MagicMock()
+        mock_opts.n_sweeps = 2
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -739,47 +934,160 @@ class TestRunOutputFiles:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
-            mock_opts = MagicMock()
-            mock_opts.n_sweeps = 2
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
-            mock_dmrg_mod.run.return_value = mock_summary
+            mock_dmrg_mod.run.return_value = _mock_summary()
             run_dmrg.run(run_dir)
 
-        mock_summary.save.assert_called_once()
-        saved_path = mock_summary.save.call_args[0][0]
-        assert saved_path.name == "state.ckpt"
+        assert mock_opts.checkpoint_dir == str(run_dir / "main")
+        assert mock_opts.artifacts_dir == str(run_dir / "main" / "artifacts")
 
-    def test_state_ckpt_skipped_when_save_state_false(self, tmp_path):
-        """With `save_state = false` in [output], summary.save must not be called."""
+    def test_resume_checkpoint_used_as_prior_checkpoint(self, tmp_path):
+        """A checkpoint found by `_find_resume_checkpoint` reaches `_init_mps`."""
         from intraknot.algorithm import run_dmrg
 
         run_dir = tmp_path / "run"
         run_dir.mkdir()
-        _write_config_toml(run_dir, extra='[output]\nsave_state = false\n')
+        _write_config_toml(run_dir)
+
+        main = run_dir / "main"
+        main.mkdir(parents=True)
+        live_ckpt = main / "dmrg.ckpt"
+        live_ckpt.write_bytes(b"live")
 
         mock_geo = MagicMock()
         mock_geo.L = 8
-        mock_summary = _mock_summary()
+        mock_opts = MagicMock()
+        mock_opts.n_sweeps = 2
+
+        with (
+            patch.object(run_dmrg, "alice") as mock_alice,
+            patch.object(run_dmrg, "logging") as ml,
+            patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
+            patch.object(run_dmrg, "_init_mps") as mock_init_mps,
+            patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
+            patch.object(run_dmrg, "write_status"),
+        ):
+            mock_alice.__version__ = "0.0.0"
+            ml.INFO = 20
+            mock_init_mps.return_value = (MagicMock(), 0, None)
+            mock_dmrg_mod.Options.from_toml.return_value = mock_opts
+            mock_dmrg_mod.run.return_value = _mock_summary()
+            run_dmrg.run(run_dir)
+
+        assert mock_init_mps.call_args[0][3] == live_ckpt
+
+
+# ---------------------------------------------------------------------------
+# run() — exception mapping
+# ---------------------------------------------------------------------------
+
+class TestRunExceptionMapping:
+    """run() maps Alice/config failures onto IntraKnot status reasons.
+
+    A deterministic configuration error must not be reported as a restartable
+    failure, or `iknot run resume` would relaunch a run that cannot succeed.
+    """
+
+    def _run_with_side_effect(self, run_dir: Path, exc: BaseException):
+        from intraknot.algorithm import run_dmrg
+
+        mock_geo = MagicMock()
+        mock_geo.L = 8
+        calls: list = []
 
         with (
             patch.object(run_dmrg, "alice"),
             patch.object(run_dmrg, "logging") as ml,
-            patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
+            patch.object(run_dmrg, "build_interaction",
+                         return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
             patch.object(run_dmrg, "load_space", return_value=(MagicMock(), {})),
             patch.object(run_dmrg, "init_mps", return_value=MagicMock()),
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
-            patch.object(run_dmrg, "write_status"),
+            patch.object(run_dmrg, "write_status",
+                         side_effect=lambda p, s: calls.append((p, s))),
         ):
             ml.INFO = 20
             mock_opts = MagicMock()
             mock_opts.n_sweeps = 2
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
-            mock_dmrg_mod.run.return_value = mock_summary
-            run_dmrg.run(run_dir)
+            mock_dmrg_mod.run.side_effect = exc
+            with pytest.raises(SystemExit):
+                run_dmrg.run(run_dir)
 
-        mock_summary.save.assert_not_called()
+        return calls
+
+    def test_value_error_sets_invalid(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, ValueError("bad target_qn"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
+
+    def test_missing_checkpoint_is_not_restartable(self, tmp_path):
+        """`init = "ckpt"` with an absent file cannot be fixed by retrying."""
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(
+            run_dir, FileNotFoundError("initial.ckpt")
+        )
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.INVALID
+        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
+        assert main_calls[-1][1].restartable is False
+
+    def test_runtime_error_sets_linear_algebra(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, RuntimeError("lanczos failed"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.LINEAR_ALGEBRA_ERROR
+        assert main_calls[-1][1].restartable is False
+
+    def test_memory_error_is_restartable(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, MemoryError())
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.OUT_OF_MEMORY
+        assert main_calls[-1][1].restartable is True
+
+    def test_unknown_exception_stays_restartable(self, tmp_path):
+        """An unrecognized failure may be transient, so retrying is allowed."""
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        calls = self._run_with_side_effect(run_dir, OSError("node lost"))
+
+        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
+        assert main_calls[-1][1].state == RunState.FAILED
+        assert main_calls[-1][1].reason == FailureReason.SCHEDULER_FAILURE
+        assert main_calls[-1][1].restartable is True
 
 
 # ---------------------------------------------------------------------------

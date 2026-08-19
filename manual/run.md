@@ -42,6 +42,12 @@ iknot run submit --scan chi_study
 iknot run submit --scan chi_study --status failed
 ```
 
+`create`, `submit`, and `start` are engine-agnostic — the same commands work unchanged for an XTRG campaign, sweeping XTRG-specific keys instead:
+
+```bash
+iknot run create --scan beta_study --set algorithm.tau_0=0.01,0.02,0.04
+```
+
 ### Auto-named single run
 
 ```bash
@@ -70,7 +76,7 @@ Run ID format:
 <engine>_<model_label>_<lattice_descriptor>[_<key1>=<val1>_<key2>=<val2>]_<uuid8>
 ```
 
-- `engine` — algorithm engine, lower-case (e.g. `dmrg`)
+- `engine` — algorithm engine from `[algorithm] engine`, lower-case (e.g. `dmrg`); it also selects the runner script that executes the run
 - `model_label` — model label from config, lower-case (e.g. `heisenberg`)
 - `lattice_descriptor` — geometry-aware size descriptor:
   - 1-D: `<lattice>_len=<lx>` (e.g. `chain_len=20`)
@@ -105,15 +111,15 @@ runs/<RUN_ID>/
 ├── slurm.toml              # Slurm settings (copied from campaign's slurm.toml)
 ├── initial.ckpt            # symlink → campaigns/<id>/initial.ckpt (only when init="ckpt")
 ├── algorithm/
-│   └── run_dmrg.py         # algorithm runner script (copied from campaign)
-├── main/
-│   ├── status.json         # initial state: {"state": "pending", ...}
-│   ├── attempts/           # one subdirectory per execution attempt
-│   └── logs/               # Slurm output and error logs
-└── summary/                # optional; may contain observables snapshots
+│   ├── run_dmrg.py         # runner scripts (copied from campaign)
+│   └── run_xtrg.py         # the one matching [algorithm] engine is executed
+└── main/
+    ├── status.json         # initial state: {"state": "pending", ...}
+    ├── attempts/           # one subdirectory per execution attempt
+    └── logs/               # Slurm output and error logs
 ```
 
-**`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[output]`, `[plugin]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
+**`config.toml`** is the run's scientific configuration. It is produced by merging the campaign's `defaults.toml` with any per-run overrides: run-level keys take precedence over campaign defaults at every section (`[geometry]`, `[model]`, `[algorithm]`, `[plugin]`). Edit `config.toml` after the run is created to set parameter values that differ from the campaign baseline — for example, to vary the bond dimension `chi` across the parameter study.
 
 #### MPS initialisation strategies
 
@@ -123,7 +129,7 @@ The `[algorithm]` section's `init` key controls how the initial MPS is construct
 |---|---|
 | `"random"` | Random MPS with `bond_dim = max_bond` (default). |
 | `"product"` | Deterministic product state (`bond_dim = 1`). Recommended for 2-site or CBE DMRG. |
-| `"resume"` | Loads `summary.state` from the most recent `dmrg.ckpt` in `main/attempts/`. Reduces the remaining sweep budget so the total sweep count is consistent. |
+| `"resume"` | Loads `summary.state` from `main/dmrg.ckpt` (a prior attempt crashed mid-sweep) or `main/artifacts/state.ckpt` (a prior attempt returned cleanly without converging). Reduces the remaining sweep budget so the total sweep count is consistent. |
 | `"ckpt"` | Loads **only** the MPS state from a checkpoint file. No sweep count or convergence history is carried over — DMRG starts fresh from this state. |
 
 ##### `target_qn` — right-boundary quantum number
@@ -169,6 +175,21 @@ init         = "ckpt"
 # init_ckpt  = "/path/to/some/other/run/state.ckpt"
 ```
 
+#### XTRG cooling schedule and resumption
+
+XTRG has no `init` key: every fresh attempt builds `ρ(τ₀)` from `[algorithm] tau_0` via a Taylor expansion and cools it for a fixed `n_steps` doubling steps to `β_max = 2^n_steps × τ₀`. Because the schedule length is fixed rather than convergence-driven, resumption is automatic rather than configured — `run_xtrg.py` always checks for it, with no `init = "resume"` equivalent to opt into.
+
+`checkpoint_dir` and `artifacts_dir` are both set to `main/`, shared across every attempt of the run. When `iknot run resume` creates a new attempt, the runner checks that one shared location for `main/xtrg.ckpt`. If found, it loads that density-matrix snapshot and its accompanying `main/thermal.ckpt` (β / log Z / discarded-weight history) and continues squaring from the recorded step, instead of rebuilding `ρ(τ₀)` from scratch. If no `xtrg.ckpt` exists (e.g. the first attempt, or a prior attempt completed successfully and its `xtrg.ckpt` was removed), the schedule starts fresh at step 0.
+
+```
+runs/<RUN_ID>/main/
+├── xtrg.ckpt            # latest rho snapshot; deleted on successful completion
+├── thermal.ckpt         # beta / log Z / discarded-weight history so far
+└── attempts/
+    ├── attempt_01/      # left xtrg.ckpt behind if interrupted mid-schedule
+    └── attempt_02/      # resumes from main/xtrg.ckpt automatically
+```
+
 #### Custom physics via `[plugin]`
 
 The `[plugin]` section lets you replace any of Alice's four built-in pipeline stages with a callable loaded from an external Python file. This is Alice's extension mechanism for non-standard lattice geometries, interaction maps, physical spaces, or Hamiltonians.
@@ -197,6 +218,8 @@ All four keys are optional and independent: specify only the stages you want to 
 ### `iknot run submit [RUN_ID]`
 
 Writes `main/submit.slurm` from the run's `slurm.toml` and submits it to the Slurm scheduler with `sbatch`. The assigned job ID is recorded in `main/job_id.txt`.
+
+The script invokes `algorithm/run_<engine>.py`, where `engine` comes from `[algorithm] engine` in the run's `config.toml`. Submission fails immediately if that runner is not present in the run's `algorithm/` directory.
 
 Provide either a positional `RUN_ID` to submit a single run, or `--scan` to submit all runs belonging to a scan (optionally filtered by `--status`).
 
@@ -288,7 +311,7 @@ runs/<RUN_ID>/main/
 
 ### `iknot run exec <SCRIPT_NAME> <RUN_ID>`
 
-Runs a follow-up (exec) script against a completed run. Exec jobs are bespoke Python scripts for post-processing, measurement, or analysis that depend on the run's output (e.g. computing a structure factor or entanglement spectrum from the converged ground state).
+Runs a follow-up (exec) script against a completed run. Exec jobs are bespoke Python scripts for post-processing, measurement, or analysis that depend on the run's output (e.g. computing a structure factor or entanglement spectrum from a converged DMRG ground state, or a thermal expectation value from an XTRG cooling trajectory).
 
 #### Synopsis
 
@@ -306,6 +329,8 @@ iknot run exec [OPTIONS] SCRIPT_NAME RUN_ID
 | `--machine PATH` | `./configs` | Path to the `configs/` directory. |
 | `--local` | off | Run with `sh` instead of submitting to Slurm. |
 | `--attempt TEXT` | none | Pin the exec script to a specific attempt (e.g. `attempt_01`). Only effective with `--local`; passed to the script as the `IKNOT_ATTEMPT` environment variable. |
+| `--delete` | off | Delete the exec slot and the promoted script instead of running anything. See [Deleting an exec job](#deleting-an-exec-job). |
+| `--yes`, `-y` | off | Skip the confirmation prompt when `--delete` is given. |
 
 #### Script search path
 
@@ -317,6 +342,8 @@ iknot run exec [OPTIONS] SCRIPT_NAME RUN_ID
 
 The script is copied into `runs/<RUN_ID>/algorithm/` and a Slurm script is written to `runs/<RUN_ID>/exec/<SCRIPT_NAME>/submit.slurm` using the `[exec]` section of the run's `slurm.toml`. The exec job is then submitted via `sbatch`, or run locally with `--local`.
 
+**Promotion only happens once.** The copy into `runs/<RUN_ID>/algorithm/` is skipped if that file already exists, and the search path checks the run directory *before* the campaign directory. This means that once a script has been promoted to a run, editing the campaign-level (or package) copy has no effect on that run — `iknot run exec` keeps using the stale run-level copy. Either edit `runs/<RUN_ID>/algorithm/<SCRIPT_NAME>.py` directly, or delete it first (see below) so it gets re-promoted from the campaign.
+
 #### Output layout
 
 ```
@@ -325,6 +352,18 @@ runs/<RUN_ID>/exec/<SCRIPT_NAME>/
 ├── logs/               # Slurm output and error logs
 └── status.json         # written by the script on completion
 ```
+
+#### Deleting an exec job
+
+```
+iknot run exec <SCRIPT_NAME> <RUN_ID> --delete [--yes]
+```
+
+Removes `runs/<RUN_ID>/exec/<SCRIPT_NAME>/` (including `logs/`, `status.json`, and `job_id.txt`) and the promoted script `runs/<RUN_ID>/algorithm/<SCRIPT_NAME>.py`. This is the way to un-stick a run-level override: after deleting, the next `iknot run exec <SCRIPT_NAME> <RUN_ID>` re-promotes the script from the campaign (or package).
+
+- Prompts for confirmation unless `--yes` is given.
+- `--delete` cannot be combined with `--local` or `--attempt`.
+- If neither the exec slot nor the promoted script exists, the command is a no-op (prints "Nothing to delete" and exits 0).
 
 ---
 

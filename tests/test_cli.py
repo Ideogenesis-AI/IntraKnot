@@ -18,6 +18,7 @@
 
 """Tests for src/intraknot/cli.py — CLI commands and helper functions."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -295,6 +296,73 @@ class TestCmdStatus:
         assert result.exit_code == 0
         assert "No status found" in result.output
 
+    def test_shows_energy_and_converged_from_current_attempt(self, tmp_path):
+        """Energy/Converged are read from the current attempt's info.json.
+
+        There is no `summary/` collection step (removed by design), so this
+        is the only source for these fields.
+        """
+        runs_root = tmp_path / "runs"
+        run_dir = self._write_main_status(
+            runs_root, "r4",
+            current_attempt="attempt_01",
+            reason=FailureReason.CONVERGED,
+        )
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "info.json").write_text(
+            json.dumps({"energy": -12.3814899971, "converged": True})
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r4", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Energy          : -12.3814899971" in result.output
+        assert "Converged       : True" in result.output
+
+    def test_no_energy_line_when_attempt_info_missing(self, tmp_path):
+        """No current attempt directory (or missing info.json) is not an error."""
+        runs_root = tmp_path / "runs"
+        self._write_main_status(
+            runs_root, "r5",
+            current_attempt="attempt_01",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r5", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Energy" not in result.output
+        assert "Converged" not in result.output
+
+    def test_shows_finished_from_xtrg_current_attempt(self, tmp_path):
+        """XTRG's info.json has no `converged` key; `finished` is shown instead.
+
+        XTRG has no numerical convergence criterion, so its `info.json` uses
+        `finished` (mirroring Alice's `Summary.finished`) rather than
+        `converged`.
+        """
+        runs_root = tmp_path / "runs"
+        run_dir = self._write_main_status(
+            runs_root, "r6",
+            current_attempt="attempt_01",
+            reason=FailureReason.FINISHED,
+        )
+        attempt_dir = run_dir / "main" / "attempts" / "attempt_01"
+        attempt_dir.mkdir(parents=True)
+        (attempt_dir / "info.json").write_text(
+            json.dumps({"log_z": 5.5478936, "finished": True})
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            main, ["status", "r6", "--runs-root", str(runs_root)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "Reason          : finished" in result.output
+        assert "Finished        : True" in result.output
+        assert "Converged" not in result.output
+
 
 # ---------------------------------------------------------------------------
 # iknot run start — scan exit code propagation
@@ -464,6 +532,42 @@ class TestCampaignCommands:
         )
         assert result.exit_code == 0, result.output
         assert (tmp_path / "campaigns" / "my_campaign").is_dir()
+
+    def test_campaign_create_algorithm_seeds_defaults(self, tmp_path):
+        """--algorithm picks the [algorithm] block written to defaults.toml."""
+        runner = CliRunner()
+        camps_root = tmp_path / "campaigns"
+        result = runner.invoke(
+            main,
+            ["campaign", "create", "xtrg_campaign",
+             "--algorithm", "xtrg",
+             "--campaigns-root", str(camps_root)],
+        )
+        assert result.exit_code == 0, result.output
+        defaults = (camps_root / "xtrg_campaign" / "defaults.toml").read_text()
+        assert 'engine        = "xtrg"' in defaults
+        assert "n_steps" in defaults
+
+    def test_campaign_create_copies_all_runners(self, tmp_path):
+        runner = CliRunner()
+        camps_root = tmp_path / "campaigns"
+        runner.invoke(
+            main,
+            ["campaign", "create", "c1", "--campaigns-root", str(camps_root)],
+        )
+        alg_dir = camps_root / "c1" / "algorithm"
+        assert (alg_dir / "run_dmrg.py").exists()
+        assert (alg_dir / "run_xtrg.py").exists()
+
+    def test_campaign_create_unknown_algorithm_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["campaign", "create", "bad",
+             "--algorithm", "nonexistent",
+             "--campaigns-root", str(tmp_path / "campaigns")],
+        )
+        assert result.exit_code != 0
 
     def test_campaign_create_duplicate_exits_nonzero(self, tmp_path):
         runner = CliRunner()
@@ -670,6 +774,130 @@ class TestRunExecCLI:
             )
         assert result.exit_code == 0, result.output
         assert captured_env.get("IKNOT_ATTEMPT") == "attempt_01"
+
+
+# ---------------------------------------------------------------------------
+# iknot run exec --delete
+# ---------------------------------------------------------------------------
+
+class TestRunExecDeleteCLI:
+    def _setup(self, tmp_path, promote: bool = True):
+        """Build a run with an exec slot and (optionally) a promoted script."""
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        _make_slurm_toml(runs_root / "r1")
+
+        exec_script = camps_root / "c1" / "algorithm" / "my_exec.py"
+        exec_script.parent.mkdir(parents=True, exist_ok=True)
+        exec_script.write_text("# exec script\n")
+
+        exec_slot = runs_root / "r1" / "exec" / "my_exec"
+        (exec_slot / "logs").mkdir(parents=True, exist_ok=True)
+        (exec_slot / "submit.slurm").write_text("#!/bin/sh\n")
+        (exec_slot / "status.json").write_text("{}")
+
+        promoted = runs_root / "r1" / "algorithm" / "my_exec.py"
+        if promote:
+            promoted.parent.mkdir(parents=True, exist_ok=True)
+            promoted.write_text("# promoted exec script\n")
+
+        return camps_root, runs_root, runner, exec_slot, promoted
+
+    def test_delete_removes_slot_and_promoted_script(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not exec_slot.exists()
+        assert not promoted.exists()
+        assert "Deleted exec slot" in result.output
+        assert "Deleted promoted script" in result.output
+
+    def test_delete_without_promoted_script_removes_slot_only(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(
+            tmp_path, promote=False
+        )
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code == 0, result.output
+        assert not exec_slot.exists()
+        assert "Deleted exec slot" in result.output
+        assert "Deleted promoted script" not in result.output
+
+    def test_delete_prompts_without_yes(self, tmp_path):
+        camps_root, runs_root, runner, exec_slot, promoted = self._setup(tmp_path)
+        # Decline the confirmation prompt.
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        assert exec_slot.exists()
+        assert promoted.exists()
+
+    def test_delete_nothing_to_delete_is_a_noop(self, tmp_path):
+        camps_root = tmp_path / "campaigns"
+        runs_root = tmp_path / "runs"
+        runner = CliRunner()
+        runner.invoke(main, ["campaign", "create", "c1",
+                             "--campaigns-root", str(camps_root)])
+        runner.invoke(main, ["run", "create", "r1",
+                             "--campaign", "c1",
+                             "--campaigns-root", str(camps_root),
+                             "--runs-root", str(runs_root)])
+        result = runner.invoke(
+            main,
+            ["run", "exec", "never_ran", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Nothing to delete" in result.output
+
+    def test_delete_missing_run_exits_nonzero(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "nonexistent",
+             "--runs-root", str(tmp_path / "runs"),
+             "--delete", "--yes"],
+        )
+        assert result.exit_code != 0
+
+    @pytest.mark.parametrize("conflicting_flag", [["--local"], ["--attempt", "attempt_01"]])
+    def test_delete_rejects_incompatible_flags(self, tmp_path, conflicting_flag):
+        camps_root, runs_root, runner, _, _ = self._setup(tmp_path)
+        result = runner.invoke(
+            main,
+            ["run", "exec", "my_exec", "r1",
+             "--campaigns-root", str(camps_root),
+             "--runs-root", str(runs_root),
+             "--delete"] + conflicting_flag,
+        )
+        assert result.exit_code != 0
+        assert "--delete cannot be combined" in result.output
 
 
 # ---------------------------------------------------------------------------

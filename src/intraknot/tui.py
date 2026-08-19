@@ -21,15 +21,15 @@
 Layout (three bands)
 --------------------
 
-    ┌─ campaign  —  N run(s) ─────────── page P/T  ← → ─┐
-    │  run_id                scan   state    conv sweeps bond │
-    │  dmrg_heis_lx64…       sweep  ✓ done   yes   100   128  │
-    │  …                                                      │
-    ├─ Detail: run_id ─────────────────────────────────────── ┤
+    ┌─ campaign — N run(s) ─────────────────── page P/T ← → ─┐
+    │  run_id                scan   state    iters  bond     │
+    │  dmrg_heis_lx64…       sweep  ✓ done   100    128      │
+    │  …                                                     │
+    ├─ Detail: run_id ───────────────────────────────────────┤
     │  state: X  ·  reason: X  ·  attempt: XX  ·  restart: X │
     │  geo+model:  lattice=chain  lx=64  ·  J=1.0  spin=0.5  │
-    │  algorithm:  engine=dmrg  max_bond=128  n_sweeps=100    │
-    └─────────────────────────────────────────────────────────┘
+    │  algorithm:  engine=dmrg  max_bond=128  n_sweeps=100   │
+    └────────────────────────────────────────────────────────┘
     [c] campaign  [r] refresh  [l] log  [←→] page  [q] quit
 
 Key bindings
@@ -38,6 +38,8 @@ Key bindings
 - `r` — refresh all run data from disk.
 - `l` — suspend TUI, open alice.log for the selected run in the configured
   editor, then resume.
+- `y` — copy the selected run's run_id to the clipboard (via OSC 52; requires
+  a terminal that supports it, e.g. iTerm2, Kitty, WezTerm, Windows Terminal).
 - `← →` — page through the run list (6 rows per page).
 - `↑ ↓` — move the row cursor (DataTable handles these natively).
 - `q` — quit.
@@ -153,8 +155,7 @@ class RunRow:
     current_attempt: Optional[str] = None
     restartable: bool = False
     nodename: Optional[str] = None
-    converged: Optional[bool] = None
-    n_sweeps: Optional[int] = None
+    iterations: Optional[int] = None
     max_bond_dim: Optional[int] = None
     geo_str: str = ""
     model_str: str = ""
@@ -238,8 +239,12 @@ def load_run_rows(
         if attempt_dir:
             info_data = _read_json(attempt_dir / "info.json") or {}
 
-        converged: Optional[bool] = info_data.get("converged")
-        n_sweeps: Optional[int] = info_data.get("n_sweeps")
+        # "iterations" generalizes DMRG's n_sweeps and XTRG's n_steps: both
+        # are a plain count of the optimization/cooling steps completed by
+        # the current attempt, just under a different name per engine.
+        iterations: Optional[int] = info_data.get("n_sweeps")
+        if iterations is None:
+            iterations = info_data.get("n_steps")
         max_bond_dim: Optional[int] = info_data.get("max_bond_dim")
 
         # Scientific config (for detail pane).
@@ -271,8 +276,7 @@ def load_run_rows(
             current_attempt=current_attempt,
             restartable=restartable,
             nodename=nodename,
-            converged=converged,
-            n_sweeps=n_sweeps,
+            iterations=iterations,
             max_bond_dim=max_bond_dim,
             geo_str=_fmt_section(config_data.get("geometry", {})),
             model_str=_fmt_section(config_data.get("model", {})),
@@ -568,9 +572,11 @@ class DashboardApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("v", "view_file", "View"),
         # l and a remain as direct shortcuts but are hidden from the footer;
-        # the v overlay covers the same files and more.
+        # the v overlay covers the same files and more. y is likewise hidden
+        # to keep the footer compact.
         Binding("l", "open_iknot_log", show=False),
         Binding("a", "open_alice_log", show=False),
+        Binding("y", "copy_run_id", show=False),
         # [ and ] are the clickable footer entries; key_display makes them
         # render as ← → so the UI stays intuitive.  The hidden priority
         # bindings on the actual arrow keys let users press ← → on the
@@ -627,11 +633,10 @@ class DashboardApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#run-table", DataTable)
-        table.add_column("run_id", width=32)
+        table.add_column("run_id", width=38)
         table.add_column("scan", width=16)
         table.add_column("state", width=13)
-        table.add_column("conv", width=5)
-        table.add_column("sweeps", width=7)
+        table.add_column("iters", width=6)
         table.add_column("bond", width=6)
         self._reload()
 
@@ -672,23 +677,20 @@ class DashboardApp(App):
             style = _STATE_STYLES.get(effective_state, "")
             state_cell = Text(f"{icon} {effective_state}", style=style)
 
-            conv_cell = (
-                "yes" if run.converged is True
-                else ("no" if run.converged is False else "—")
+            iters_cell = (
+                str(run.iterations) if run.iterations is not None else "—"
             )
-            sweeps_cell = str(run.n_sweeps) if run.n_sweeps is not None else "—"
             bond_cell = str(run.max_bond_dim) if run.max_bond_dim is not None else "—"
 
             rid = run.run_id
-            if len(rid) > 30:
-                rid = rid[:29] + "…"
+            if len(rid) > 36:
+                rid = rid[:35] + "…"
 
             table.add_row(
                 rid,
                 run.scan_id or "—",
                 state_cell,
-                conv_cell,
-                sweeps_cell,
+                iters_cell,
                 bond_cell,
                 key=run.run_id,
             )
@@ -777,6 +779,22 @@ class DashboardApp(App):
         # the editor subprocess and resumes the TUI when the editor exits.
         with self.suspend():
             subprocess.run([self._editor, str(log_path)], check=False)
+
+    def action_copy_run_id(self) -> None:
+        """Copy the selected run's run_id to the clipboard via OSC 52.
+
+        OSC 52 is relayed by the terminal emulator, so this only reaches the
+        clipboard when the terminal in use supports it (most do, notably
+        excluding macOS Terminal.app). This is the mechanism that also works
+        when `iknot tui` is run over SSH, since the escape sequence is
+        forwarded to the local terminal on the client side.
+        """
+        run = self._selected_run()
+        if run is None:
+            self.notify("No run selected.", severity="warning")
+            return
+        self.copy_to_clipboard(run.run_id)
+        self.notify(f"Copied {run.run_id}")
 
     def action_view_file(self) -> None:
         """Open the file viewer overlay for the selected run."""

@@ -15,12 +15,12 @@ The key rule is: **same scientific definition → new attempt; changed scientifi
 ```
 campaign   a scientific group or parameter study
 run        one simulation case, usually one parameter point
-main       the primary calculation of a run (e.g. DMRG ground-state search)
+main       the primary calculation of a run (e.g. DMRG ground-state search, XTRG cooling schedule)
 attempt    one execution try of main; new attempts are created on failure
 exec job   a follow-up computation on a completed run (measurements, analysis, etc.)
 ```
 
-Most calculations follow the simple path `campaign → run → main → attempt`. Once a ground state is obtained, any number of exec jobs (bespoke Python scripts) can be run against it under the `exec/` directory of the run.
+Most calculations follow the simple path `campaign → run → main → attempt`. Once `main` completes, any number of exec jobs (bespoke Python scripts) can be run against its output under the `exec/` directory of the run.
 
 ## Repository layout
 
@@ -37,7 +37,8 @@ intraknot/
 │       ├── discover.py      # cluster hardware discovery (sinfo)
 │       ├── tui.py           # interactive campaign dashboard
 │       └── algorithm/
-│           └── run_dmrg.py  # IntraKnot-aware DMRG runner
+│           ├── run_dmrg.py  # IntraKnot-aware DMRG runner
+│           └── run_xtrg.py  # IntraKnot-aware XTRG runner
 ├── configs/                 # machine, path, and scheduler settings
 ├── campaigns/               # scientific groupings and run indexes
 ├── runs/                    # actual simulation cases
@@ -109,17 +110,20 @@ A campaign records which runs belong together and why. Each campaign carries a `
 ```
 campaigns/heisenberg_dmrg_chi_scan/
 ├── campaign.yaml       # YAML: campaign_id, description, algorithm, created_at
-├── defaults.toml       # TOML: default [algorithm] and [output] for all runs
+├── defaults.toml       # TOML: default [algorithm] for all runs
 ├── slurm.toml          # TOML: Slurm defaults for all runs (copied from configs/)
 ├── runs.csv            # CSV: run registry (run_id, scan_id)
 ├── submit_array.slurm  # optional Slurm array script
 ├── notes.md
 └── algorithm/
-    ├── run_dmrg.py     # algorithm runner copied from src/intraknot/algorithm/
+    ├── run_dmrg.py     # bundled runners, copied from src/intraknot/algorithm/
+    ├── run_xtrg.py
     └── <any>.py        # custom exec scripts placed here are auto-discovered
 ```
 
-`defaults.toml` is generated with all four sections — `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
+Every bundled runner is copied into each campaign, because the engine that executes a run is chosen per run by `[algorithm] engine` in its `config.toml`. The `--algorithm` flag on `iknot campaign create` therefore only selects which engine's defaults seed `defaults.toml`; it does not restrict the campaign to one algorithm.
+
+`defaults.toml` is generated with all three sections — `[geometry]`, `[model]`, and `[algorithm]`. Fields marked `"_init_"` or `0` must be filled in before creating runs. When `[geometry]` and `[model]` are fully specified, `iknot run create` needs no `--config` argument at all.
 
 `runs.csv` is the run registry for the campaign, with two columns:
 
@@ -139,10 +143,11 @@ A run is one simulation case, typically one parameter point. It carries its own 
 ```
 runs/heis_L64_chi128_g1.0/
 ├── manifest.yaml        # YAML: run_id, campaign, algorithm, status, created_at, machine
-├── config.toml          # TOML: physics-only config (geometry, model, algorithm, output)
+├── config.toml          # TOML: physics-only config (geometry, model, algorithm)
 ├── slurm.toml           # TOML: Slurm resources (copied from campaign; edit before submit)
 ├── algorithm/
-│   ├── run_dmrg.py      # primary runner, copied from campaign/algorithm/
+│   ├── run_dmrg.py      # runners, copied from campaign/algorithm/
+│   ├── run_xtrg.py      # the one matching [algorithm] engine is executed
 │   └── <any>.py         # exec scripts promoted here on first use
 ├── main/
 │   ├── submit.slurm     # Slurm script for the primary job
@@ -150,32 +155,35 @@ runs/heis_L64_chi128_g1.0/
 │   ├── status.json      # primary job state
 │   ├── logs/            # Slurm stdout/stderr for the primary job
 │   ├── current -> attempts/attempt_01
+│   ├── dmrg.ckpt        # DMRG: live per-sweep checkpoint, shared checkpoint_dir
+│   ├── xtrg.ckpt        # XTRG: live density-matrix checkpoint, shared checkpoint_dir
+│   ├── thermal.ckpt     # XTRG: beta / log Z / discarded-weight history, shared
+│   ├── conv.csv         # DMRG: per-sweep diagnostics, accumulated across ALL attempts
+│   ├── artifacts/       # shared artifacts_dir
+│   │   ├── state.ckpt       # DMRG: final archived state (overwritten each attempt)
+│   │   └── step_XX.ckpt     # XTRG: per-step archives (accumulated, one file per step)
 │   └── attempts/
 │       └── attempt_01/
 │           ├── alice.log        # Alice logging output (DEBUG+, timestamped)
 │           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
-│           ├── dmrg.ckpt        # per-sweep checkpoint written by Alice
-│           ├── state.ckpt       # final MPS state (torch.save)
-│           ├── info.json
-│           ├── conv.csv
+│           ├── info.json        # per-attempt snapshot of the latest results
 │           └── status.json
-├── exec/                # all exec (follow-up) jobs; one slot per script
-│   └── compute_sf/
-│       ├── submit.slurm
-│       ├── job_id.txt
-│       ├── status.json
-│       ├── logs/
-│       └── <outputs>
-└── summary/
-    ├── info.json
-    └── status.json
+└── exec/                # all exec (follow-up) jobs; one slot per script
+    └── compute_sf/
+        ├── submit.slurm
+        ├── job_id.txt
+        ├── status.json
+        ├── logs/
+        └── <outputs>
 ```
 
 `config.toml` is the source of truth for the scientific configuration of a run and must not be silently modified after the run is created. `slurm.toml` is the source of truth for Slurm resource requests; edit it before submitting if a particular run needs non-default resources.
 
 ### Run scientific config (`config.toml`)
 
-Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding `[algorithm]` and `[output]` sections. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
+Run configs use Alice's `[geometry]` / `[model]` structure directly, with IntraKnot adding an `[algorithm]` section. Both `[geometry]` and `[model]` are passed as-is to `alice.build_interaction()`.
+
+`[algorithm] engine` selects the algorithm: the submit script invokes `algorithm/run_<engine>.py`, and each runner refuses a config naming a different engine. Runs in one campaign — even in one array job — may use different engines.
 
 ```toml
 [geometry]
@@ -199,14 +207,9 @@ n_sweeps     = 20
 e_tol        = 1.0e-8
 trunc_thresh = 1.0e-15
 init         = "product"   # "product", "random", "resume", or "ckpt"
-
-[output]
-save_state      = true
-save_checkpoint = true
-observables     = ["energy", "entropy"]
 ```
 
-When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[geometry]`, `[model]`, `[algorithm]`, and `[output]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
+When a campaign has `defaults.toml`, `iknot run create` merges the campaign's `[geometry]`, `[model]`, and `[algorithm]` defaults into the run's `config.toml`. Run-level values override campaign defaults.
 
 ### Status model
 
@@ -219,14 +222,15 @@ failed   execution failed; may be retryable with a new attempt
 invalid  parameters or inputs are wrong; do not retry unchanged
 ```
 
-Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan_detected`, `not_converged`, `max_sweeps_reached`, `bad_parameters`, `checkpoint_missing`, `scheduler_failure`.
+Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan_detected`, `not_converged` (DMRG), `not_finished` (XTRG), `max_sweeps_reached`, `bad_parameters`, `checkpoint_missing`, `scheduler_failure`.
 
 ### Restart policy
 
 | Situation | Action |
 |---|---|
 | Timeout, OOM, node failure, preemption | New attempt in the same `main/` |
-| Not converged — more sweeps needed | New attempt (resumes from last checkpoint) |
+| Not converged — more sweeps needed (DMRG) | New attempt (resumes from last checkpoint) |
+| Not finished — schedule interrupted (XTRG) | New attempt (resumes from last checkpoint) |
 | Changed Hamiltonian, lattice size, bond dimension, algorithm | New run in the same campaign |
 | Bug fix that changes scientific results | New run |
 | Wrong `config.toml` | Mark run as `invalid`; create corrected run |
@@ -248,7 +252,7 @@ Activate a campaign so that subsequent `run create` commands are automatically a
 ```bash
 iknot campaign create heisenberg_dmrg_chi_scan \
     --description "DMRG chi scan for Heisenberg chain" \
-    --algorithm dmrg
+    --algorithm dmrg   # seeds defaults.toml; all runners are copied regardless
 
 iknot campaign activate heisenberg_dmrg_chi_scan
 # also prints instructions to run: export INTRAKNOT_CAMPAIGN=heisenberg_dmrg_chi_scan
@@ -314,7 +318,7 @@ iknot resume campaign --id heisenberg_dmrg_chi_scan
 iknot status heis_L64_chi128_g1.0
 ```
 
-Prints primary job state, current attempt, energy and convergence, and a summary line for each exec job slot found under `exec/`.
+Prints primary job state, current attempt, and engine-specific observables (energy and convergence for DMRG, finished-schedule status for XTRG), plus a summary line for each exec job slot found under `exec/`.
 
 ### Monitor campaigns (TUI)
 

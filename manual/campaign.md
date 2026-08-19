@@ -42,7 +42,7 @@ iknot campaign create [OPTIONS] CAMPAIGN_ID
 | Option                  | Default     | Description                                           |
 | ----------------------- | ----------- | ----------------------------------------------------- |
 | `--description TEXT`    | `""`        | Human-readable description stored in `campaign.yaml`. |
-| `--algorithm TEXT`      | `dmrg`      | Algorithm runner script to copy into `algorithm/`.    |
+| `--algorithm TEXT`      | `dmrg`      | Engine whose defaults seed `defaults.toml`.           |
 | `--campaigns-root PATH` | `campaigns` | Parent directory for campaign subdirectories.         |
 | `--machine PATH`        | `./configs` | Path to the `configs/` directory.                     |
 
@@ -59,10 +59,13 @@ campaigns/<CAMPAIGN_ID>/
 ├── logs/               # Slurm array job log files
 └── algorithm/
     ├── algorithm.lock  # provenance tracking for all scripts in this directory
-    └── run_dmrg.py     # algorithm runner script (or the one named by --algorithm)
+    ├── run_dmrg.py     # every bundled runner is copied, regardless of --algorithm
+    └── run_xtrg.py
 ```
 
-`**defaults.toml**` is the campaign's baseline scientific configuration. It is an Alice-compatible TOML file with up to four sections: `[geometry]`, `[model]`, `[algorithm]`, and `[output]`. When a run is created with `iknot run create`, the campaign's `defaults.toml` is merged with any per-run overrides to produce the run's `config.toml`. Edit `defaults.toml` after creating the campaign and before creating any runs to set the shared parameters for the whole parameter study.
+All bundled runners are installed because each run picks its engine through `[algorithm] engine` in its own `config.toml`; `--algorithm` only decides which engine's parameter block seeds `defaults.toml`. A campaign can therefore hold DMRG and XTRG runs side by side.
+
+`**defaults.toml**` is the campaign's baseline scientific configuration. It is an Alice-compatible TOML file with up to three sections: `[geometry]`, `[model]`, and `[algorithm]`. When a run is created with `iknot run create`, the campaign's `defaults.toml` is merged with any per-run overrides to produce the run's `config.toml`. Edit `defaults.toml` after creating the campaign and before creating any runs to set the shared parameters for the whole parameter study.
 
 `**slurm.toml**` is a verbatim copy of `configs/slurm.toml` at the time the campaign is created. Edit it here to set campaign-wide Slurm settings (e.g. partition, walltime suited to the expected bond dimension).
 
@@ -262,6 +265,7 @@ campaigns/<CAMPAIGN_ID>/
 └── algorithm/
     ├── algorithm.lock      # provenance tracking file
     ├── run_dmrg.py         # managed entry (installed from intraknot package)
+    ├── run_xtrg.py         # managed entry (installed from intraknot package)
     └── my_obs.py           # custom entry (user-authored)
 ```
 
@@ -360,12 +364,13 @@ The `restartable` flag is set by the algorithm runner script. It is `true` only 
 
 | `reason` | Retryable | Notes |
 |---|---|---|
-| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. |
-| `out_of_memory` | yes | Job was killed by the OOM killer; increase `mem` in `slurm.toml` if needed. |
-| `scheduler_failure` | yes | Slurm node failure or preemption; retry unchanged. |
+| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. Resuming continues from the last checkpoint (DMRG's `main/dmrg.ckpt`, or XTRG's `main/xtrg.ckpt` + `main/thermal.ckpt`), not a restart from scratch. |
+| `out_of_memory` | yes | Job was killed by the OOM killer; increase `mem` in `slurm.toml` if needed. Resuming continues from the last checkpoint, as for `timeout`. |
+| `scheduler_failure` | yes | Slurm node failure or preemption; resuming continues from the last checkpoint, as for `timeout`. |
 | `checkpoint_missing` | yes | Expected checkpoint not found; retry from scratch or earlier checkpoint. |
-| `not_converged` | yes | Sweep loop finished without meeting the convergence threshold; resume to continue sweeping from the last checkpoint. |
-| `max_sweeps_reached` | no | Sweep budget exhausted; increase `max_sweeps` in `config.toml`. |
+| `not_converged` | yes | DMRG-specific: sweep loop finished without meeting the convergence threshold; resume to continue sweeping from the last checkpoint. |
+| `not_finished` | yes | XTRG-specific (currently unreachable): cooling schedule ended without completing all `n_steps`; resume to continue cooling from the last checkpoint. |
+| `max_sweeps_reached` | no | DMRG-specific: sweep budget exhausted; increase `max_sweeps` in `config.toml`. Does not apply to XTRG. |
 | `bad_parameters` | no | Configuration error; fix `config.toml` and create a new run instead. |
 | `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code version. |
 | `nan_detected` | no | Numerical instability; requires parameter changes. |

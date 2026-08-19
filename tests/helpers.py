@@ -131,7 +131,6 @@ def make_run_dir(
     run_dir = base / run_id
     (run_dir / "main" / "attempts" / "attempt_01").mkdir(parents=True)
     (run_dir / "main" / "logs").mkdir(parents=True)
-    (run_dir / "summary").mkdir()
     (run_dir / "algorithm").mkdir()
     (run_dir / "algorithm" / "run_dmrg.py").write_text("# stub\n")
 

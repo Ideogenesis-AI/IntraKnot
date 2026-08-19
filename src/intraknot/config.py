@@ -130,7 +130,8 @@ class SlurmTomlConfig:
     basic:
         Shared account and mail settings.
     main:
-        Resource settings for the primary (DMRG) job.
+        Resource settings for the primary job (whichever engine `[algorithm]
+        engine` in `config.toml` selects — DMRG, XTRG, or another runner).
     exec_:
         Resource settings for exec (follow-up) jobs.
     """
@@ -944,11 +945,11 @@ def _merge_defaults(
 ) -> Dict[str, Any]:
     """Merge campaign-level defaults with a run-level config dict.
 
-    The campaign provides fallback `[geometry]`, `[model]`, `[algorithm]`,
-    and `[output]` sections. Run-level keys take precedence over campaign
-    defaults at every section. This allows a campaign's `defaults.toml` to
-    define the full physical model for a parameter study, with individual
-    runs overriding only the keys that differ.
+    The campaign provides fallback `[geometry]`, `[model]`, and `[algorithm]`
+    sections. Run-level keys take precedence over campaign defaults at
+    every section. This allows a campaign's `defaults.toml` to define the
+    full physical model for a parameter study, with individual runs
+    overriding only the keys that differ.
 
     Parameters
     ----------

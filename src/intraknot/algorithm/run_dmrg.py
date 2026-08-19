@@ -20,7 +20,9 @@
 
 This script is a standalone entry point executed by Slurm from within a run
 directory. It reads `config.toml`, builds the Hamiltonian via Alice, runs
-DMRG, and writes all outputs to the attempt directory.
+DMRG, and writes its outputs to `main/` (checkpoints, artifacts, and the
+accumulated convergence history) and to a fresh attempt directory (logs and
+per-attempt status).
 
 Usage
 -----
@@ -28,9 +30,9 @@ Usage
 
 The script resolves the next attempt automatically by inspecting
 `main/attempts/` and incrementing the highest existing index. If a previous
-attempt left a `dmrg.ckpt`, the MPS state is loaded from it and DMRG
-continues from the last completed sweep; otherwise a fresh MPS is initialized
-via `alice.init_mps`.
+attempt left resumable state behind (see "DMRG checkpointing" below), the MPS
+state is loaded from it and DMRG continues from the last completed sweep;
+otherwise a fresh MPS is initialized via `alice.init_mps`.
 
 MPS initialisation
 ------------------
@@ -55,33 +57,61 @@ controls the initial bond dimension and random seed:
 
 DMRG checkpointing
 ------------------
-Alice writes `dmrg.ckpt` atomically after every completed sweep, mirroring
-the convention of `configure_logging`. IntraKnot sets `checkpoint_dir` to
-the current attempt directory so the per-sweep checkpoint always lands there.
-On resumption (`init = "resume"`), IntraKnot loads `dmrg.ckpt` from the most
-recent prior attempt and passes `summary.state` to `dmrg.run` as the initial
-MPS; the remaining sweep budget is reduced by `summary.n_sweeps` so the total
-sweep count stays consistent with the original target.
+`checkpoint_dir` and `artifacts_dir` are both set to `main/` (Alice
+>= 0.2.5 decouples the two, but there is no reason here to keep them apart),
+so every attempt of the same run shares one physical location instead of
+each attempt getting its own copy. Two kinds of resumable state can be left
+behind in `main/`:
 
-Outputs (written to `main/attempts/attempt_NN/`)
-------------------------------------------------
+- `dmrg.ckpt` — Alice's atomically-written per-sweep checkpoint. Present
+  only if a prior attempt was killed or crashed mid-sweep (timeout, OOM,
+  preemption, node failure); a clean return from `dmrg.run()` always removes
+  it, converged or not.
+- `artifacts/state.ckpt` — Alice's archived final `Summary`, written on
+  every clean return from `dmrg.run()` (converged or not, unlike the
+  previous release where only convergence triggered an equivalent write).
+  If a prior attempt returned cleanly without converging (sweep budget
+  exhausted), this is the resumable state, since `dmrg.ckpt` no longer
+  exists in that case.
+
+`_find_resume_checkpoint` checks these two fixed locations directly (no
+scan across attempt directories is needed, since there is only one shared
+location). On resumption (`init = "resume"`), IntraKnot passes
+`summary.state` to `dmrg.run` as the initial MPS; the remaining sweep budget
+is reduced by `summary.n_sweeps` so the total sweep count stays consistent
+with the original target.
+
+Outputs
+-------
+Written to `main/` (shared across every attempt of this run):
+
+dmrg.ckpt
+    PyTorch checkpoint written by Alice after every sweep (atomic rename from
+    `dmrg_lock.ckpt`), loadable via `dmrg.Summary.load`. Removed by Alice on
+    any clean return from `dmrg.run()`, converged or not.
+artifacts/state.ckpt
+    Final `Summary` archived by Alice on every clean return from
+    `dmrg.run()`, carrying the correct `converged` flag (unlike `dmrg.ckpt`,
+    whose own `converged` field is hardcoded `False` since it is written
+    before the convergence check runs each sweep). Overwritten by each
+    attempt that reaches a clean return.
+conv.csv
+    Per-sweep diagnostics accumulated across every attempt: sweep, energy,
+    delta_energy, discarded_weight, converged. Sweep numbers are offset by
+    the number of sweeps completed by prior attempts, so the file reads as
+    one continuous history regardless of how many attempts it took.
+
+Written to `main/attempts/attempt_NN/` (one attempt's own execution):
+
 alice.log
     Alice logging output from this attempt (DEBUG and above, timestamped).
 iknot.log
     Combined log: IntraKnot bookkeeping messages plus Alice output (via
     log propagation to the root logger).
-dmrg.ckpt
-    PyTorch checkpoint written by Alice after every sweep (atomic rename from
-    `dmrg_lock.ckpt`). Loadable via `dmrg.Summary.load`.
-state.ckpt
-    Final canonical state file; written by IntraKnot on successful
-    completion using `summary.save`.
 info.json
-    Key scalar results: energy, energy_per_site, converged, n_sweeps,
-    max_bond_dim.
-conv.csv
-    Per-sweep diagnostics: sweep, energy, delta_energy, discarded_weight,
-    converged.
+    Key scalar results as of this attempt: algorithm, alice_version,
+    system_size, energy, energy_per_site, converged, n_sweeps
+    (total across all attempts), max_bond_dim, bond_dims.
 status.json
     AttemptStatus record written by IntraKnot (not by Alice).
 """
@@ -196,11 +226,20 @@ def _resolve_attempt_dir(run_dir: Path) -> Tuple[Path, str]:
     return attempts_root / name, name
 
 
-def _find_latest_checkpoint(run_dir: Path) -> Optional[Path]:
-    """Return the most recent `dmrg.ckpt` across all prior attempts, or `None`.
+def _find_resume_checkpoint(run_dir: Path) -> Optional[Path]:
+    """Return the checkpoint to resume from, or `None` for a fresh start.
 
-    Iterates attempt directories in reverse order and returns the first
-    checkpoint found, so the latest attempt is preferred.
+    `checkpoint_dir` and `artifacts_dir` are both set to `main/` (see `run`
+    below), so there is exactly one place to look for each kind of
+    resumable state rather than scanning `attempts/*`:
+
+    - `main/dmrg.ckpt`, if a prior attempt crashed or was killed mid-sweep
+      (Alice's atomic per-sweep write survives that).
+    - Otherwise `main/artifacts/state.ckpt`, if a prior attempt returned
+      cleanly without converging (Alice removes `dmrg.ckpt` on any clean
+      return, so the archived artifact is the only state left in that case).
+      Only returned when its `converged` flag is `False`; a converged
+      archive means there is nothing left to resume.
 
     Parameters
     ----------
@@ -210,16 +249,18 @@ def _find_latest_checkpoint(run_dir: Path) -> Optional[Path]:
     Returns
     -------
     Path | None
-        Path to the checkpoint file, or `None` if no checkpoint exists.
+        Path to the checkpoint to resume from, or `None` if neither exists.
     """
-    attempts_root = run_dir / "main" / "attempts"
-    if not attempts_root.exists():
-        return None
+    live = run_dir / "main" / "dmrg.ckpt"
+    if live.exists():
+        return live
 
-    for attempt_dir in sorted(attempts_root.iterdir(), reverse=True):
-        ckpt = attempt_dir / "dmrg.ckpt"
-        if ckpt.exists():
-            return ckpt
+    archived = run_dir / "main" / "artifacts" / "state.ckpt"
+    if archived.exists():
+        prev = dmrg.Summary.load(archived)
+        if not prev.converged:
+            return archived
+
     return None
 
 
@@ -305,7 +346,7 @@ def _init_mps(
     L: int,
     prior_checkpoint: Optional[Path],
     run_dir: Path,
-) -> Tuple[MPS, int]:
+) -> Tuple[MPS, int, Optional[float]]:
     """Initialize the MPS for a DMRG run.
 
     Four strategies controlled by `cfg_algo["init"]`:
@@ -339,16 +380,20 @@ def _init_mps(
     L:
         Chain length.
     prior_checkpoint:
-        Path to `dmrg.ckpt` from a previous attempt, or `None`.
+        Path to the checkpoint to resume from (`main/dmrg.ckpt` or
+        `main/artifacts/state.ckpt`, see `_find_resume_checkpoint`), or
+        `None`.
     run_dir:
         Root of the run directory; used to resolve the default `initial.ckpt`
         path when `init = "ckpt"` and no explicit `init_ckpt` is configured.
 
     Returns
     -------
-    mps, sweeps_done
-        The initial MPS in right-canonical form (`center = 0`) and the
-        number of DMRG sweeps already completed (non-zero only when resuming).
+    mps, sweeps_done, resumed_energy
+        The initial MPS in right-canonical form (`center = 0`), the number
+        of DMRG sweeps already completed (non-zero only when resuming), and
+        the energy at the end of that last sweep (`None` unless resuming),
+        used by the caller to seed `conv.csv`'s first `delta_energy`.
 
     Raises
     ------
@@ -374,7 +419,7 @@ def _init_mps(
         mps = source.state
         mps.canonical(0)
         logger.info("  bond dims: %s", source.bond_dims)
-        return mps, 0
+        return mps, 0, None
 
     if init_strategy == "resume":
         if prior_checkpoint is not None:
@@ -386,7 +431,7 @@ def _init_mps(
                 "  loaded %d sweeps, energy=%.10g, converged=%s",
                 prev.n_sweeps, prev.energy, prev.converged,
             )
-            return mps, prev.n_sweeps
+            return mps, prev.n_sweeps, prev.energy
         logger.warning(
             "init=resume requested but no prior checkpoint found; "
             "falling back to random initialization."
@@ -414,7 +459,39 @@ def _init_mps(
         logger.info("")
         mps = init_mps(L, Spc, Op, bond_dim=bond_dim, target_qn=target_qn, seed=seed)
 
-    return mps, 0
+    return mps, 0, None
+
+
+# ---------------------------------------------------------------------------
+# Config validation
+# ---------------------------------------------------------------------------
+
+class _EngineMismatch(ValueError):
+    """Raised when `config.toml` selects an engine other than DMRG."""
+
+
+def _validate_config(cfg_algo: Dict[str, Any]) -> None:
+    """Reject orchestration settings inconsistent with this runner.
+
+    `[algorithm] engine` decides which runner the submit script invokes, so
+    a mismatch here means the wrong runner was dispatched. Failing fast is
+    safer than silently running a different algorithm.
+
+    Parameters
+    ----------
+    cfg_algo:
+        `config["algorithm"]` dict.
+
+    Raises
+    ------
+    _EngineMismatch
+        If `engine` is set to anything other than `"dmrg"`.
+    """
+    engine = str(cfg_algo.get("engine", "dmrg")).lower()
+    if engine != "dmrg":
+        raise _EngineMismatch(
+            f"run_dmrg.py requires algorithm.engine='dmrg', got {engine!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +502,7 @@ def _write_observables(
     attempt_dir: Path,
     summary: dmrg.Summary,
     L: int,
+    sweeps_done: int,
 ) -> None:
     """Write `info.json` to the attempt directory.
 
@@ -433,15 +511,22 @@ def _write_observables(
     attempt_dir:
         Attempt output directory.
     summary:
-        Completed DMRG summary.
+        This attempt's DMRG summary.
     L:
         Chain length (for per-site energy).
+    sweeps_done:
+        Number of sweeps completed by prior attempts before this one
+        started (`0` for a fresh run), so `n_sweeps` reports the total
+        across every attempt rather than just this one.
     """
     obs: Dict[str, Any] = {
+        "algorithm": "dmrg",
+        "alice_version": alice.__version__,
+        "system_size": L,
         "energy": summary.energy,
         "energy_per_site": summary.energy / L if L > 0 else float("nan"),
         "converged": summary.converged,
-        "n_sweeps": summary.n_sweeps,
+        "n_sweeps": sweeps_done + summary.n_sweeps,
         "max_bond_dim": max(summary.bond_dims) if summary.bond_dims else 0,
         "bond_dims": summary.bond_dims,
     }
@@ -450,34 +535,58 @@ def _write_observables(
     )
 
 
-def _write_convergence(attempt_dir: Path, summary: dmrg.Summary) -> None:
-    """Write `conv.csv` to the attempt directory.
+def _write_convergence(
+    run_dir: Path,
+    summary: dmrg.Summary,
+    sweeps_done: int,
+    resumed_energy: Optional[float],
+) -> None:
+    """Append this attempt's per-sweep diagnostics to the shared `main/conv.csv`.
+
+    Unlike `info.json` (a per-attempt snapshot), `conv.csv` accumulates
+    across every attempt of the same run: DMRG's sweep budget is reduced on
+    resume, so `summary.energies` here only covers the sweeps completed by
+    *this* attempt. Rows are appended (header written only once) with sweep
+    numbers offset by `sweeps_done` so the full sweep history reads as one
+    continuous table regardless of how many attempts it took.
 
     Parameters
     ----------
-    attempt_dir:
-        Attempt output directory.
+    run_dir:
+        Root of the run directory; the file is `run_dir/main/conv.csv`.
     summary:
-        Completed DMRG summary.
+        This attempt's DMRG summary.
+    sweeps_done:
+        Number of sweeps completed by prior attempts before this one
+        started (`0` for a fresh run).
+    resumed_energy:
+        Energy at the end of the last sweep of the prior attempt (from the
+        resumed checkpoint), used so the first row's `delta_energy` on a
+        resumed attempt is a real value instead of `NaN`. `None` for a
+        fresh run (whose first row has no prior energy to diff against).
     """
-    path = attempt_dir / "conv.csv"
+    path = run_dir / "main" / "conv.csv"
+    write_header = not path.exists()
     energies: List[float] = summary.energies
     dw: List[float] = summary.discarded_weights
 
-    with open(path, "w", newline="") as f:
+    with open(path, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["sweep", "energy", "delta_energy", "discarded_weight", "converged"])
+        if write_header:
+            writer.writerow(["sweep", "energy", "delta_energy", "discarded_weight", "converged"])
+        prev_energy = resumed_energy
         for i, e in enumerate(energies):
-            delta = abs(e - energies[i - 1]) if i > 0 else math.nan
+            delta = abs(e - prev_energy) if prev_energy is not None else math.nan
             # converged only on the last sweep if summary.converged is True.
             conv = (i == len(energies) - 1) and summary.converged
             writer.writerow([
-                i + 1,
+                sweeps_done + i + 1,
                 f"{e:.12g}",
                 f"{delta:.6e}" if not math.isnan(delta) else "nan",
                 f"{dw[i]:.6e}" if i < len(dw) else "0.0",
                 conv,
             ])
+            prev_energy = e
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +618,6 @@ def run(run_dir: Path) -> None:
         "plugin":   cfg.get("plugin", {}),
     }
     cfg_algo = cfg.get("algorithm", {})
-    cfg_output = cfg.get("output", {})
 
     # Resolve attempt directory and announce intent.
     attempt_dir, attempt_name = _resolve_attempt_dir(run_dir)
@@ -562,11 +670,9 @@ def run(run_dir: Path) -> None:
         AttemptStatus(state=RunState.RUNNING, started_at=started_at),
     )
 
-    # Locate any prior checkpoint for resume support.
-    # Exclude the current (empty) attempt dir from the search.
-    prior_checkpoint = _find_latest_checkpoint(run_dir)
-    if prior_checkpoint and prior_checkpoint.parent == attempt_dir:
-        prior_checkpoint = None
+    # Locate any prior checkpoint for resume support (main/dmrg.ckpt or
+    # main/artifacts/state.ckpt; see _find_resume_checkpoint).
+    prior_checkpoint = _find_resume_checkpoint(run_dir)
 
     summary: Optional[dmrg.Summary] = None
     end_state = RunState.FAILED
@@ -574,19 +680,25 @@ def run(run_dir: Path) -> None:
     restartable = True
 
     try:
+        _validate_config(cfg_algo)
+
         # Build Hamiltonian.
         interactions, spc, geo = build_interaction(cfg_model)
         mpo = build_hamiltonian(interactions, geo.L, spc)
         L = geo.L
 
         # Initialise MPS (fresh, resumed from checkpoint, or loaded from ckpt file).
-        mps, sweeps_done = _init_mps(cfg_model, cfg_algo, L, prior_checkpoint, run_dir)
+        mps, sweeps_done, resumed_energy = _init_mps(
+            cfg_model, cfg_algo, L, prior_checkpoint, run_dir,
+        )
 
         # Build DMRG options from the `[algorithm]` section. Override
-        # checkpoint_dir so Alice writes its per-sweep dmrg.ckpt directly
-        # into the attempt directory.
+        # checkpoint_dir and artifacts_dir so Alice writes dmrg.ckpt and the
+        # archived state.ckpt to main/, shared across every attempt of this
+        # run instead of nested under this attempt's own directory.
         opts = dmrg.Options.from_toml(cfg_algo)
-        opts.checkpoint_dir = str(attempt_dir)
+        opts.checkpoint_dir = str(run_dir / "main")
+        opts.artifacts_dir = str(run_dir / "main" / "artifacts")
 
         # Reduce the sweep budget when resuming so the total sweep count
         # relative to the original n_sweeps target stays consistent.
@@ -600,17 +712,13 @@ def run(run_dir: Path) -> None:
 
         # --- Run DMRG ---
         summary = dmrg.run(mps, mpo, opts)
-        # dmrg.ckpt is already written by Alice into attempt_dir after each sweep.
-
-        # Save final canonical state.
-        if cfg_output.get("save_state", True):
-            state_path = attempt_dir / "state.ckpt"
-            summary.save(state_path)
-            logger.info("Saved final state: %s", state_path)
+        # Alice has already archived artifacts/state.ckpt and removed
+        # dmrg.ckpt/dmrg_lock.ckpt from main/ (converged or not), so no
+        # further checkpoint bookkeeping is needed here.
 
         # Write observables and convergence table.
-        _write_observables(attempt_dir, summary, L)
-        _write_convergence(attempt_dir, summary)
+        _write_observables(attempt_dir, summary, L, sweeps_done)
+        _write_convergence(run_dir, summary, sweeps_done, resumed_energy)
 
         # Determine final status.
         if summary.converged:
@@ -622,10 +730,24 @@ def run(run_dir: Path) -> None:
             end_reason = FailureReason.NOT_CONVERGED
             restartable = True
 
+    except _EngineMismatch:
+        logger.exception("Engine mismatch: wrong runner dispatched")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
     except MemoryError:
         logger.exception("Out of memory")
         end_reason = FailureReason.OUT_OF_MEMORY
         restartable = True
+    except (FileNotFoundError, KeyError, TypeError, ValueError, NotImplementedError):
+        logger.exception("Invalid DMRG configuration")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
+    except RuntimeError:
+        logger.exception("DMRG numerical failure")
+        end_reason = FailureReason.LINEAR_ALGEBRA_ERROR
+        restartable = False
     except Exception:
         logger.exception("Unhandled exception during DMRG")
         end_reason = FailureReason.SCHEDULER_FAILURE

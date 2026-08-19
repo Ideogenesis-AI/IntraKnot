@@ -42,14 +42,20 @@ class RunState(str, Enum):
 class FailureReason(str, Enum):
     """Reason codes for terminal or failure states.
 
-    `CONVERGED` is a success reason used when `state=completed`.
-    The remaining values describe failure modes; some are retryable
-    (`TIMEOUT`, `OUT_OF_MEMORY`, `SCHEDULER_FAILURE`) and some are not
-    (`BAD_PARAMETERS`, `CHECKPOINT_INCOMPATIBLE`).
+    `CONVERGED` and `FINISHED` are success reasons used when `state=completed`:
+    `CONVERGED` for algorithms with a numerical convergence criterion (DMRG),
+    `FINISHED` for algorithms that instead run a fixed schedule to completion
+    (XTRG's cooling steps). Their failure-mode counterparts, `NOT_CONVERGED`
+    and `NOT_FINISHED`, follow the same split. The remaining values describe
+    failure modes; some are retryable (`TIMEOUT`, `OUT_OF_MEMORY`,
+    `SCHEDULER_FAILURE`) and some are not (`BAD_PARAMETERS`,
+    `CHECKPOINT_INCOMPATIBLE`).
     """
 
     CONVERGED = "converged"
     NOT_CONVERGED = "not_converged"
+    FINISHED = "finished"
+    NOT_FINISHED = "not_finished"
     MAX_SWEEPS_REACHED = "max_sweeps_reached"
     TIMEOUT = "timeout"
     OUT_OF_MEMORY = "out_of_memory"
@@ -82,6 +88,9 @@ RETRYABLE_REASONS: frozenset[FailureReason] = frozenset({
     # NOT_CONVERGED is retryable: the run can continue sweeping from its last
     # checkpoint until convergence is reached.
     FailureReason.NOT_CONVERGED,
+    # NOT_FINISHED is retryable: the run can continue its cooling schedule
+    # from its last checkpoint (XTRG's xtrg.ckpt + thermal.ckpt).
+    FailureReason.NOT_FINISHED,
 })
 
 
