@@ -119,10 +119,10 @@ Exec jobs:
 | `finished` | — | Success (XTRG only). XTRG completed its fixed cooling schedule (`n_steps` doublings). Does not imply numerical convergence — XTRG has no convergence criterion. |
 | `not_finished` | yes | Failure (XTRG only, currently unreachable). Reserved for a schedule that ends without completing all `n_steps`; resume to continue cooling from the last checkpoint. |
 | `max_sweeps_reached` | no | DMRG-specific: sweep budget exhausted before convergence. Does not apply to XTRG. |
-| `timeout` | yes | Job exceeded the requested walltime. Resuming continues from the last checkpoint for both DMRG (`dmrg.ckpt`) and XTRG (`progress.ckpt` + `thermal.ckpt`). |
+| `timeout` | yes | Job exceeded the requested walltime. Resuming continues from the last checkpoint for both DMRG (`main/dmrg.ckpt` or `main/artifacts/state.ckpt`) and XTRG (`main/xtrg.ckpt` + `main/thermal.ckpt`). |
 | `out_of_memory` | yes | Job was killed by the out-of-memory handler. Resuming continues from the last checkpoint, as for `timeout`. |
 | `nan_detected` | no | Numerical instability during the sweep (DMRG) or cooling step (XTRG). |
-| `bad_parameters` | no | Configuration values rejected by the runner, or (XTRG only) a `progress.ckpt` found past step 0 with no matching `thermal.ckpt` to recover history from. |
+| `bad_parameters` | no | Configuration values rejected by the runner. |
 | `checkpoint_missing` | yes | Expected restart checkpoint was not found. |
 | `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code. |
 | `linear_algebra_error` | no | Low-level linear algebra routine failed. |
