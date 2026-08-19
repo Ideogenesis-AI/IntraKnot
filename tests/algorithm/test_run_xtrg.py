@@ -201,48 +201,27 @@ class TestAttemptDirectory:
 
 
 # ---------------------------------------------------------------------------
-# _find_latest_progress
+# _find_resume_checkpoint
 # ---------------------------------------------------------------------------
 
-class TestFindLatestProgress:
-    """Tests for `_find_latest_progress`."""
+class TestFindResumeCheckpoint:
+    """Tests for `_find_resume_checkpoint`."""
 
-    def test_returns_none_when_no_attempts_root(self, tmp_path):
-        from intraknot.algorithm.run_xtrg import _find_latest_progress
-        assert _find_latest_progress(tmp_path) is None
+    def test_returns_none_when_main_absent(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _find_resume_checkpoint
+        assert _find_resume_checkpoint(tmp_path) is None
 
-    def test_returns_none_when_no_ckpt_in_any_attempt(self, tmp_path):
-        from intraknot.algorithm.run_xtrg import _find_latest_progress
-        (tmp_path / "main" / "attempts" / "attempt_01").mkdir(parents=True)
-        assert _find_latest_progress(tmp_path) is None
+    def test_returns_none_when_no_ckpt_in_main(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _find_resume_checkpoint
+        (tmp_path / "main").mkdir(parents=True)
+        assert _find_resume_checkpoint(tmp_path) is None
 
-    def test_returns_ckpt_from_single_attempt(self, tmp_path):
-        from intraknot.algorithm.run_xtrg import _find_latest_progress
-        a1 = tmp_path / "main" / "attempts" / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "progress.ckpt").write_bytes(b"")
-        assert _find_latest_progress(tmp_path) == a1 / "progress.ckpt"
-
-    def test_prefers_later_attempt_over_earlier(self, tmp_path):
-        from intraknot.algorithm.run_xtrg import _find_latest_progress
-        root = tmp_path / "main" / "attempts"
-        a1 = root / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "progress.ckpt").write_bytes(b"old")
-        a2 = root / "attempt_02"
-        a2.mkdir()
-        (a2 / "progress.ckpt").write_bytes(b"new")
-        assert _find_latest_progress(tmp_path) == a2 / "progress.ckpt"
-
-    def test_skips_attempt_without_ckpt(self, tmp_path):
-        """Returns the most recent attempt that *has* a checkpoint."""
-        from intraknot.algorithm.run_xtrg import _find_latest_progress
-        root = tmp_path / "main" / "attempts"
-        a1 = root / "attempt_01"
-        a1.mkdir(parents=True)
-        (a1 / "progress.ckpt").write_bytes(b"")
-        (root / "attempt_02").mkdir()  # no ckpt
-        assert _find_latest_progress(tmp_path) == a1 / "progress.ckpt"
+    def test_returns_ckpt_when_present_in_main(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _find_resume_checkpoint
+        main = tmp_path / "main"
+        main.mkdir(parents=True)
+        (main / "xtrg.ckpt").write_bytes(b"")
+        assert _find_resume_checkpoint(tmp_path) == main / "xtrg.ckpt"
 
 
 # ---------------------------------------------------------------------------
@@ -630,11 +609,11 @@ class TestRunOutputFiles:
 
 
 # ---------------------------------------------------------------------------
-# run() — resumption from a prior attempt's progress.ckpt
+# run() — resumption from main/xtrg.ckpt
 # ---------------------------------------------------------------------------
 
 class TestRunResume:
-    """run() must resume from the latest progress.ckpt when one exists."""
+    """run() must resume from `main/xtrg.ckpt` when one exists."""
 
     def _run_with_mocks(self, run_dir: Path, *, loaded_artifact=None):
         """Call `run_xtrg.run()` with Alice mocked; return the mocks used.
@@ -645,7 +624,7 @@ class TestRunResume:
             Run directory containing a pre-written `config.toml`.
         loaded_artifact:
             Value returned by `xtrg.Artifact.load`. Only consulted by the
-            runner when a prior `progress.ckpt` is found.
+            runner when `main/xtrg.ckpt` is found.
 
         Returns
         -------
@@ -679,7 +658,7 @@ class TestRunResume:
 
         return {"xtrg": mock_xtrg, "thermal_mpo": mock_thermal_mpo}
 
-    def test_no_prior_progress_builds_fresh_state(self, tmp_path):
+    def test_no_prior_checkpoint_builds_fresh_state(self, tmp_path):
         """With no prior attempt, the runner builds rho(tau_0) via thermal_mpo."""
         run_dir = tmp_path / "run"
         run_dir.mkdir()
@@ -693,63 +672,37 @@ class TestRunResume:
         state = mocks["xtrg"].run.call_args[0][0]
         assert state is mocks["xtrg"].Artifact.return_value
 
-    def test_prior_progress_at_step_zero_resumes_without_thermal_ckpt(self, tmp_path):
-        """Resuming from step 0 does not require a thermal.ckpt to exist."""
+    def test_prior_checkpoint_resumes_from_main(self, tmp_path):
+        """A prior `main/xtrg.ckpt` is loaded and used as the starting state,
+        with no copying needed since thermal.ckpt already lives in main/."""
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         _write_config_toml(run_dir)
-        prior_attempt = run_dir / "main" / "attempts" / "attempt_01"
-        prior_attempt.mkdir(parents=True)
-        (prior_attempt / "progress.ckpt").write_bytes(b"artifact-step-0")
+        main = run_dir / "main"
+        main.mkdir(parents=True)
+        (main / "xtrg.ckpt").write_bytes(b"artifact-step-1")
+        (main / "thermal.ckpt").write_bytes(b"thermal-history")
 
-        loaded = MagicMock(step=0, beta=0.001)
+        loaded = MagicMock(step=1, beta=0.002)
         mocks = self._run_with_mocks(run_dir, loaded_artifact=loaded)
 
         mocks["thermal_mpo"].assert_not_called()
-        mocks["xtrg"].Artifact.load.assert_called_once_with(
-            prior_attempt / "progress.ckpt"
-        )
+        mocks["xtrg"].Artifact.load.assert_called_once_with(main / "xtrg.ckpt")
         state = mocks["xtrg"].run.call_args[0][0]
         assert state is loaded
-        # No thermal.ckpt needed or copied at step 0.
-        new_attempt = run_dir / "main" / "attempts" / "attempt_02"
-        assert not (new_attempt / "thermal.ckpt").exists()
+        # thermal.ckpt is untouched — no per-attempt copy is made.
+        assert (main / "thermal.ckpt").read_bytes() == b"thermal-history"
 
-    def test_prior_progress_past_step_zero_copies_thermal_ckpt(self, tmp_path):
-        """Resuming past step 0 copies the matching thermal.ckpt forward."""
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        _write_config_toml(run_dir)
-        prior_attempt = run_dir / "main" / "attempts" / "attempt_01"
-        prior_attempt.mkdir(parents=True)
-        (prior_attempt / "progress.ckpt").write_bytes(b"artifact-step-1")
-        (prior_attempt / "thermal.ckpt").write_bytes(b"thermal-history")
-
-        loaded = MagicMock(step=1, beta=0.002)
-        self._run_with_mocks(run_dir, loaded_artifact=loaded)
-
-        new_attempt = run_dir / "main" / "attempts" / "attempt_02"
-        copied = new_attempt / "thermal.ckpt"
-        assert copied.exists()
-        assert copied.read_bytes() == b"thermal-history"
-
-    def test_prior_progress_past_step_zero_missing_thermal_ckpt_is_invalid(self, tmp_path):
-        """A step>0 progress.ckpt without a matching thermal.ckpt cannot resume."""
-        from intraknot.status import FailureReason, RunState
-
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        _write_config_toml(run_dir)
-        prior_attempt = run_dir / "main" / "attempts" / "attempt_01"
-        prior_attempt.mkdir(parents=True)
-        (prior_attempt / "progress.ckpt").write_bytes(b"artifact-step-1")
-        # thermal.ckpt deliberately absent.
-
+    def test_checkpoint_and_artifacts_dir_point_to_main(self, tmp_path):
         from intraknot.algorithm import run_xtrg
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
 
         mock_geo = MagicMock()
         mock_geo.L = 8
-        calls: list = []
+        mock_opts = _mock_opts()
 
         with (
             patch.object(run_xtrg, "alice") as mock_alice,
@@ -761,36 +714,16 @@ class TestRunResume:
             patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
             patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()),
             patch.object(run_xtrg, "xtrg") as mock_xtrg,
-            patch.object(
-                run_xtrg, "write_status",
-                side_effect=lambda p, s: calls.append((p, s)),
-            ),
+            patch.object(run_xtrg, "write_status"),
         ):
             mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
-            mock_xtrg.Options.from_toml.return_value = _mock_opts()
-            mock_xtrg.Artifact.load.return_value = MagicMock(step=1, beta=0.002)
-            with pytest.raises(SystemExit):
-                run_xtrg.run(run_dir)
+            mock_xtrg.Options.from_toml.return_value = mock_opts
+            mock_xtrg.run.return_value = (_mock_summary(), _mock_artifact())
+            run_xtrg.run(run_dir)
 
-        mock_xtrg.run.assert_not_called()
-        main_calls = [(p, s) for p, s in calls if "attempt" not in str(p)]
-        assert main_calls[-1][1].state == RunState.INVALID
-        assert main_calls[-1][1].reason == FailureReason.BAD_PARAMETERS
-        assert main_calls[-1][1].restartable is False
-
-    def test_current_empty_attempt_dir_is_excluded_from_search(self, tmp_path):
-        """The freshly created (empty) attempt dir must not be mistaken for a
-        prior attempt to resume from."""
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
-        _write_config_toml(run_dir)
-        # No prior attempts exist; attempt_01 is created fresh by run() itself.
-
-        mocks = self._run_with_mocks(run_dir)
-
-        mocks["thermal_mpo"].assert_called_once()
-        mocks["xtrg"].Artifact.load.assert_not_called()
+        assert mock_opts.checkpoint_dir == str(run_dir / "main")
+        assert mock_opts.artifacts_dir == str(run_dir / "main" / "artifacts")
 
 
 # ---------------------------------------------------------------------------
