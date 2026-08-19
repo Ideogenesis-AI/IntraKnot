@@ -155,16 +155,18 @@ runs/heis_L64_chi128_g1.0/
 │   ├── status.json      # primary job state
 │   ├── logs/            # Slurm stdout/stderr for the primary job
 │   ├── current -> attempts/attempt_01
+│   ├── dmrg.ckpt        # DMRG: live per-sweep checkpoint, shared checkpoint_dir
+│   ├── xtrg.ckpt        # XTRG: live density-matrix checkpoint, shared checkpoint_dir
+│   ├── thermal.ckpt     # XTRG: beta / log Z / discarded-weight history, shared
+│   ├── conv.csv         # DMRG: per-sweep diagnostics, accumulated across ALL attempts
+│   ├── artifacts/       # shared artifacts_dir
+│   │   ├── state.ckpt       # DMRG: final archived state (overwritten each attempt)
+│   │   └── step_XX.ckpt     # XTRG: per-step archives (accumulated, one file per step)
 │   └── attempts/
 │       └── attempt_01/
 │           ├── alice.log        # Alice logging output (DEBUG+, timestamped)
 │           ├── iknot.log        # IntraKnot + Alice combined log (INFO+)
-│           ├── dmrg.ckpt        # DMRG: per-sweep checkpoint (removed once converged)
-│           ├── state.ckpt       # DMRG: final MPS state, written only on convergence
-│           ├── progress.ckpt    # XTRG: latest rho snapshot (deleted on completion)
-│           ├── thermal.ckpt     # XTRG: beta / log Z / discarded-weight history
-│           ├── info.json
-│           ├── conv.csv
+│           ├── info.json        # per-attempt snapshot of the latest results
 │           └── status.json
 └── exec/                # all exec (follow-up) jobs; one slot per script
     └── compute_sf/
