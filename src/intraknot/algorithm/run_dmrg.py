@@ -109,8 +109,9 @@ iknot.log
     Combined log: IntraKnot bookkeeping messages plus Alice output (via
     log propagation to the root logger).
 info.json
-    Key scalar results as of this attempt: energy, energy_per_site,
-    converged, n_sweeps (total across all attempts), max_bond_dim.
+    Key scalar results as of this attempt: algorithm, alice_version,
+    system_size, energy, energy_per_site, converged, n_sweeps
+    (total across all attempts), max_bond_dim, bond_dims.
 status.json
     AttemptStatus record written by IntraKnot (not by Alice).
 """
@@ -519,6 +520,9 @@ def _write_observables(
         across every attempt rather than just this one.
     """
     obs: Dict[str, Any] = {
+        "algorithm": "dmrg",
+        "alice_version": alice.__version__,
+        "system_size": L,
         "energy": summary.energy,
         "energy_per_site": summary.energy / L if L > 0 else float("nan"),
         "converged": summary.converged,
