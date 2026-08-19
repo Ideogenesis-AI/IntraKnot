@@ -89,7 +89,7 @@ RETRYABLE_REASONS: frozenset[FailureReason] = frozenset({
     # checkpoint until convergence is reached.
     FailureReason.NOT_CONVERGED,
     # NOT_FINISHED is retryable: the run can continue its cooling schedule
-    # from its last checkpoint (XTRG's progress.ckpt + thermal.ckpt).
+    # from its last checkpoint (XTRG's xtrg.ckpt + thermal.ckpt).
     FailureReason.NOT_FINISHED,
 })
 
