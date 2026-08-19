@@ -109,7 +109,7 @@ def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
     mock_geo.L = 8
 
     with (
-        patch.object(run_dmrg, "alice"),
+        patch.object(run_dmrg, "alice") as mock_alice,
         # Suppress FileHandler creation and root-logger mutation; keep
         # logging.INFO as a real int so logger.setLevel() on the module-level
         # real logger doesn't receive a MagicMock.
@@ -121,6 +121,7 @@ def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
         patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
         patch.object(run_dmrg, "write_status"),
     ):
+        mock_alice.__version__ = "0.0.0"
         mock_logging.INFO = 20
         mock_bi.return_value = ([], MagicMock(), mock_geo)
         mock_opts = MagicMock()
@@ -330,6 +331,17 @@ class TestWriteObservables:
         assert data["n_sweeps"] == 4
         assert data["max_bond_dim"] == 8
         assert data["bond_dims"] == [2, 4, 8, 4, 2]
+
+    def test_metadata_fields(self, tmp_path):
+        from intraknot.algorithm import run_dmrg
+        from intraknot.algorithm.run_dmrg import _write_observables
+        with patch.object(run_dmrg, "alice") as mock_alice:
+            mock_alice.__version__ = "9.9.9"
+            _write_observables(tmp_path, self._summary(), L=8, sweeps_done=0)
+        data = json.loads((tmp_path / "info.json").read_text())
+        assert data["algorithm"] == "dmrg"
+        assert data["alice_version"] == "9.9.9"
+        assert data["system_size"] == 8
 
     def test_n_sweeps_includes_prior_attempts(self, tmp_path):
         """`n_sweeps` must report the total across all attempts, not just this one."""
@@ -692,7 +704,7 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 10  # original budget
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -700,6 +712,7 @@ class TestRunSweepBudget:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -721,7 +734,7 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 2  # budget already exhausted
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -729,6 +742,7 @@ class TestRunSweepBudget:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -750,7 +764,7 @@ class TestRunSweepBudget:
         mock_opts.n_sweeps = 10
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -758,6 +772,7 @@ class TestRunSweepBudget:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -782,7 +797,7 @@ class TestRunStatus:
         calls: list = []
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -794,6 +809,7 @@ class TestRunStatus:
                 side_effect=lambda p, s: calls.append((p, s)),
             ),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_opts = MagicMock()
             mock_opts.n_sweeps = 2
@@ -909,7 +925,7 @@ class TestRunSharedPaths:
         mock_opts.n_sweeps = 2
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -918,6 +934,7 @@ class TestRunSharedPaths:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
             mock_dmrg_mod.run.return_value = _mock_summary()
@@ -945,7 +962,7 @@ class TestRunSharedPaths:
         mock_opts.n_sweeps = 2
 
         with (
-            patch.object(run_dmrg, "alice"),
+            patch.object(run_dmrg, "alice") as mock_alice,
             patch.object(run_dmrg, "logging") as ml,
             patch.object(run_dmrg, "build_interaction", return_value=([], MagicMock(), mock_geo)),
             patch.object(run_dmrg, "build_hamiltonian", return_value=MagicMock()),
@@ -953,6 +970,7 @@ class TestRunSharedPaths:
             patch.object(run_dmrg, "dmrg") as mock_dmrg_mod,
             patch.object(run_dmrg, "write_status"),
         ):
+            mock_alice.__version__ = "0.0.0"
             ml.INFO = 20
             mock_init_mps.return_value = (MagicMock(), 0, None)
             mock_dmrg_mod.Options.from_toml.return_value = mock_opts
