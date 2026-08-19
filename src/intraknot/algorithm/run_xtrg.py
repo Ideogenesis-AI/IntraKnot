@@ -75,8 +75,10 @@ iknot.log
     Combined log: IntraKnot bookkeeping messages plus Alice output (via
     log propagation to the root logger).
 info.json
-    Key scalar results: beta, free energy, energy, specific heat, entropy,
-    finished, n_steps, max_bond_dim.
+    Key scalar results: algorithm, alice_version, system_size, finished,
+    n_steps, free_energies_per_site (full curve, one entry per cooling
+    step), max_bond_dim, bond_dims. Other thermodynamic observables are
+    only kept in thermodynamics.csv, not duplicated here.
 thermodynamics.csv
     Per-step thermodynamic history: step, beta, temperature, log_z,
     free_energy_per_site, energy_per_site, specific_heat_per_site,
@@ -406,28 +408,22 @@ def _write_observables(
     summary:
         Completed XTRG thermodynamic summary.
     artifact:
-        Final density-matrix snapshot (bond dimensions and last beta).
+        Final density-matrix snapshot (bond dimensions).
     L:
         Chain length.
     """
     bond_dims = artifact.rho.bond_dims
-    beta = artifact.beta
     obs: Dict[str, Any] = {
         "algorithm": "xtrg",
         "alice_version": alice.__version__,
         "system_size": L,
         "finished": summary.finished,
         "n_steps": summary.n_steps,
-        "beta": beta,
-        "temperature": 1.0 / beta,
-        "log_z": summary.log_z[-1],
-        "free_energy_per_site": summary.free_energies[-1],
-        "energy_per_site": summary.energies[-1],
-        "specific_heat_per_site": summary.specific_heats[-1],
-        "entropy_per_site": summary.entropies[-1],
-        "discarded_weight": (
-            summary.discarded_weights[-1] if summary.discarded_weights else 0.0
-        ),
+        # Full free-energy-per-site curve across the cooling schedule (one
+        # entry per row of thermodynamics.csv); the other thermodynamic
+        # observables are only kept in thermodynamics.csv, not duplicated
+        # here.
+        "free_energies_per_site": summary.free_energies,
         "max_bond_dim": max(bond_dims) if bond_dims else 0,
         "bond_dims": bond_dims,
     }
