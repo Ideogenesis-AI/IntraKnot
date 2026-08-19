@@ -364,7 +364,7 @@ The `restartable` flag is set by the algorithm runner script. It is `true` only 
 
 | `reason` | Retryable | Notes |
 |---|---|---|
-| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. Resuming continues from the last checkpoint (DMRG's `dmrg.ckpt`, or XTRG's `progress.ckpt` + `thermal.ckpt`), not a restart from scratch. |
+| `timeout` | yes | Job ran out of walltime; extend via `slurm.toml` if needed. Resuming continues from the last checkpoint (DMRG's `main/dmrg.ckpt`, or XTRG's `main/xtrg.ckpt` + `main/thermal.ckpt`), not a restart from scratch. |
 | `out_of_memory` | yes | Job was killed by the OOM killer; increase `mem` in `slurm.toml` if needed. Resuming continues from the last checkpoint, as for `timeout`. |
 | `scheduler_failure` | yes | Slurm node failure or preemption; resuming continues from the last checkpoint, as for `timeout`. |
 | `checkpoint_missing` | yes | Expected checkpoint not found; retry from scratch or earlier checkpoint. |
