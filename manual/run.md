@@ -129,7 +129,7 @@ The `[algorithm]` section's `init` key controls how the initial MPS is construct
 |---|---|
 | `"random"` | Random MPS with `bond_dim = max_bond` (default). |
 | `"product"` | Deterministic product state (`bond_dim = 1`). Recommended for 2-site or CBE DMRG. |
-| `"resume"` | Loads `summary.state` from the most recent `dmrg.ckpt` in `main/attempts/`. Reduces the remaining sweep budget so the total sweep count is consistent. |
+| `"resume"` | Loads `summary.state` from `main/dmrg.ckpt` (a prior attempt crashed mid-sweep) or `main/artifacts/state.ckpt` (a prior attempt returned cleanly without converging). Reduces the remaining sweep budget so the total sweep count is consistent. |
 | `"ckpt"` | Loads **only** the MPS state from a checkpoint file. No sweep count or convergence history is carried over — DMRG starts fresh from this state. |
 
 ##### `target_qn` — right-boundary quantum number
@@ -179,14 +179,15 @@ init         = "ckpt"
 
 XTRG has no `init` key: every fresh attempt builds `ρ(τ₀)` from `[algorithm] tau_0` via a Taylor expansion and cools it for a fixed `n_steps` doubling steps to `β_max = 2^n_steps × τ₀`. Because the schedule length is fixed rather than convergence-driven, resumption is automatic rather than configured — `run_xtrg.py` always checks for it, with no `init = "resume"` equivalent to opt into.
 
-When `iknot run resume` creates a new attempt, the runner looks across **all** prior attempt directories (not just the immediately preceding one) for the most recent `progress.ckpt`. If found, it loads that density-matrix snapshot and its accompanying `thermal.ckpt` (β / log Z / discarded-weight history) and continues squaring from the recorded step, instead of rebuilding `ρ(τ₀)` from scratch. If no prior `progress.ckpt` exists (e.g. the first attempt, or a prior attempt completed successfully and its `progress.ckpt` was removed), the schedule starts fresh at step 0.
+`checkpoint_dir` and `artifacts_dir` are both set to `main/`, shared across every attempt of the run. When `iknot run resume` creates a new attempt, the runner checks that one shared location for `main/xtrg.ckpt`. If found, it loads that density-matrix snapshot and its accompanying `main/thermal.ckpt` (β / log Z / discarded-weight history) and continues squaring from the recorded step, instead of rebuilding `ρ(τ₀)` from scratch. If no `xtrg.ckpt` exists (e.g. the first attempt, or a prior attempt completed successfully and its `xtrg.ckpt` was removed), the schedule starts fresh at step 0.
 
 ```
-runs/<RUN_ID>/main/attempts/
-├── attempt_01/
-│   ├── progress.ckpt   # latest rho snapshot; deleted on successful completion
-│   └── thermal.ckpt    # beta / log Z / discarded-weight history so far
-└── attempt_02/          # resumes attempt_01 automatically if it left a progress.ckpt
+runs/<RUN_ID>/main/
+├── xtrg.ckpt            # latest rho snapshot; deleted on successful completion
+├── thermal.ckpt         # beta / log Z / discarded-weight history so far
+└── attempts/
+    ├── attempt_01/      # left xtrg.ckpt behind if interrupted mid-schedule
+    └── attempt_02/      # resumes from main/xtrg.ckpt automatically
 ```
 
 #### Custom physics via `[plugin]`
