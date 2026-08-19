@@ -373,12 +373,11 @@ class TestWriteObservables:
         assert data["system_size"] == 8
         assert data["finished"] is True
         assert data["n_steps"] == 2
-        assert data["beta"] == pytest.approx(artifact.beta)
-        assert data["temperature"] == pytest.approx(1.0 / artifact.beta)
-        assert data["log_z"] == pytest.approx(summary.log_z[-1])
-        assert data["energy_per_site"] == pytest.approx(summary.energies[-1])
+        assert data["free_energies_per_site"] == pytest.approx(summary.free_energies)
         assert data["max_bond_dim"] == 4
         assert data["bond_dims"] == [2, 4, 4, 2]
+        assert "beta" not in data
+        assert "energy_per_site" not in data
 
 
 # ---------------------------------------------------------------------------
