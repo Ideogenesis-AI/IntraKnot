@@ -44,14 +44,41 @@ is for DMRG's sweep count — `xtrg.ckpt` survives only if a prior attempt
 crashed or was killed mid-step). `checkpoint_dir` and `artifacts_dir` are
 both set to `main/` (Alice >= 0.2.5 decouples the two, but there is no
 reason here to keep them apart), shared across every attempt of this run,
-so both files are already exactly where the next attempt looks — no
-forwarding between attempt directories is needed. If an earlier attempt was
-interrupted, this runner resumes automatically: it loads `main/xtrg.ckpt`
-as the starting `alice.algorithm.xtrg.Artifact` and continues squaring from
-that step onward rather than rebuilding ρ(τ₀) from scratch (Alice recovers
-the β/log Z history itself by reading `main/thermal.ckpt`). When no
-`xtrg.ckpt` exists, ρ(τ₀) is built fresh via a Taylor expansion
-(`thermal_mpo`).
+so every checkpoint is already exactly where the next attempt looks — no
+forwarding between attempt directories is needed.
+
+Alice >= 0.2.6 accepts a starting state at any step covered by
+`thermal.ckpt`, which makes each archived `artifacts/step_XX.ckpt` a
+genuine restart point. This runner therefore picks its starting state from
+the first of these that applies:
+
+1. `main/artifacts/step_XX.ckpt` for an explicit
+   `[algorithm] resume_from_step`, which re-cools a segment a previous
+   attempt already covered (e.g. at a larger `max_bond`). It outranks
+   `xtrg.ckpt`, since overriding the automatic choice is the point.
+2. `main/xtrg.ckpt`, left behind by an attempt that crashed or was killed
+   mid-step.
+3. The highest archived step at or below `n_steps`, which continues a run
+   that already finished a shorter schedule — raise `n_steps` in
+   `config.toml` and submit again, and the cooling picks up where the
+   earlier run stopped instead of restarting.
+4. Nothing, in which case ρ(τ₀) is built fresh via a Taylor expansion
+   (`thermal_mpo`).
+
+Two properties of `n_steps` and τ₀ matter when continuing a run. `n_steps`
+counts cooling steps from τ₀, so it is the absolute step index to stop at,
+not a number of steps to add; and τ₀ anchors the whole β grid, so it must
+match the value the recorded history was built with. Both are checked
+against `main/thermal.ckpt` before any expensive work, and a violation ends
+the attempt as `invalid` with reason `checkpoint_incompatible`.
+
+Continuing from a step below the end of the recorded history is allowed —
+that is what re-cooling a segment means — but Alice then truncates the
+later `thermal.ckpt` entries and overwrites the `step_XX.ckpt` archives
+past that step. Before handing over, this runner copies `thermal.ckpt` to
+`main/thermal_old.ckpt`, and removes that copy only once the replacement
+history has been written and validated, so an interrupted continuation
+never leaves the run without a readable series.
 
 Outputs
 -------
@@ -60,12 +87,18 @@ Written to `main/` (shared across every attempt of this run):
 thermal.ckpt
     Native thermodynamic `alice.algorithm.xtrg.Summary`, written atomically
     by Alice after every completed cooling step.
+thermal_old.ckpt
+    Copy of the `thermal.ckpt` a continuation is about to truncate, kept
+    only while that continuation is in flight (see above). Absent from a
+    run that has never been continued from an earlier step.
 xtrg.ckpt
     Native density-matrix `alice.algorithm.xtrg.Artifact` for the most
     recent cooling step. Alice removes it after successful completion.
 artifacts/step_XX.ckpt
-    Optional archived density-matrix artifacts, controlled by
-    `algorithm.save_artifacts` and `algorithm.save_artifacts_since`.
+    Archived density-matrix artifacts, controlled by
+    `algorithm.save_artifacts` and `algorithm.save_artifacts_since`, and the
+    only way to continue a run that has already finished — a run archiving
+    nothing can only be recomputed from τ₀.
 
 Written to `main/attempts/attempt_NN/` (one attempt's own execution):
 
@@ -76,9 +109,10 @@ iknot.log
     log propagation to the root logger).
 info.json
     Key scalar results: algorithm, alice_version, system_size, finished,
-    n_steps, free_energies_per_site (full curve, one entry per cooling
-    step), max_bond_dim, bond_dims. Other thermodynamic observables are
-    only kept in thermodynamics.csv, not duplicated here.
+    n_steps, start_step and resumed_from (which step this attempt started
+    at and which file it came from), free_energies_per_site (full curve, one
+    entry per cooling step), max_bond_dim, bond_dims. Other thermodynamic
+    observables are only kept in thermodynamics.csv, not duplicated here.
 thermodynamics.csv
     Per-step thermodynamic history: step, beta, temperature, log_z,
     free_energy_per_site, energy_per_site, specific_heat_per_site,
@@ -97,6 +131,7 @@ import datetime
 import json
 import logging
 import math
+import shutil
 import socket
 import sys
 import tomllib
@@ -170,6 +205,26 @@ class _EngineMismatch(ValueError):
     """Raised when `config.toml` selects an engine other than XTRG."""
 
 
+class _CheckpointMissing(FileNotFoundError):
+    """Raised when a checkpoint this attempt must resume from is absent.
+
+    Either `[algorithm] resume_from_step` names an archived step that was
+    never written, or a starting state past step 0 has no `thermal.ckpt`
+    beside it to recover the β / log Z history from. Neither is fixable by
+    running the same attempt again, so both are reported as `invalid`.
+    """
+
+
+class _CheckpointIncompatible(ValueError):
+    """Raised when the recovered history disagrees with the starting state.
+
+    Mirrors the consistency conditions Alice's `xtrg.run` enforces on a
+    resumed run, checked here first so the failure is classified as a
+    checkpoint problem rather than a generic bad-parameter one, and so it
+    is reported before the Hamiltonian is built.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Attempt directory resolution
 # ---------------------------------------------------------------------------
@@ -229,6 +284,176 @@ def _find_resume_checkpoint(run_dir: Path) -> Optional[Path]:
     """
     ckpt = run_dir / "main" / "xtrg.ckpt"
     return ckpt if ckpt.exists() else None
+
+
+def _archived_artifact_path(run_dir: Path, step: int) -> Path:
+    """Return the path Alice archives the artifact of `step` at.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    step:
+        Cooling step index.
+
+    Returns
+    -------
+    Path
+        `main/artifacts/step_XX.ckpt`, whether or not it exists.
+    """
+    return run_dir / "main" / "artifacts" / f"step_{step:02d}.ckpt"
+
+
+def _latest_archived_step(run_dir: Path, n_steps: int) -> Optional[int]:
+    """Return the highest archived step index not past `n_steps`.
+
+    Steps beyond `n_steps` are skipped rather than selected and rejected
+    later: `n_steps` is the absolute step index to stop at, so Alice raises
+    on a starting state past it. Lowering `n_steps` between attempts should
+    therefore shorten the schedule, not break the run.
+
+    Names that do not parse as `step_<int>.ckpt` are ignored, which also
+    skips Alice's transient `step_XX_lock.ckpt` write-lock files.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    n_steps:
+        Absolute step index this attempt stops at.
+
+    Returns
+    -------
+    int | None
+        Highest usable archived step, or `None` when `main/artifacts/` holds
+        no archive at or below `n_steps`.
+    """
+    artifacts_dir = run_dir / "main" / "artifacts"
+    if not artifacts_dir.is_dir():
+        return None
+
+    steps = []
+    for path in artifacts_dir.glob("step_*.ckpt"):
+        try:
+            step = int(path.stem.removeprefix("step_"))
+        except ValueError:
+            continue
+        if 0 <= step <= n_steps:
+            steps.append(step)
+    return max(steps) if steps else None
+
+
+def _resolve_start_checkpoint(
+    run_dir: Path,
+    n_steps: int,
+    resume_from_step: Optional[int],
+) -> Tuple[Optional[Path], str]:
+    """Choose the checkpoint this attempt starts its cooling schedule from.
+
+    Alice >= 0.2.6 accepts a starting state at any step covered by
+    `thermal.ckpt`, so an archived `step_XX.ckpt` is a genuine restart point
+    and not only a record. The candidates are tried in this order:
+
+    1. `main/artifacts/step_XX.ckpt` for an explicit
+       `[algorithm] resume_from_step`. It outranks `xtrg.ckpt` because
+       overriding the automatic choice is the whole point of the setting:
+       re-cooling a segment that a previous attempt already covered.
+    2. `main/xtrg.ckpt`, left behind by an attempt that crashed or was
+       killed mid-step (Alice removes it on success).
+    3. The highest archived step at or below `n_steps`, which continues a
+       run that already finished a shorter schedule.
+    4. Nothing, so the caller builds ρ(τ₀) from scratch.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    n_steps:
+        Absolute step index this attempt stops at.
+    resume_from_step:
+        Explicitly requested starting step, or `None` to choose
+        automatically.
+
+    Returns
+    -------
+    Path | None
+        Checkpoint to load the starting state from, or `None` for a fresh
+        ρ(τ₀) build.
+    str
+        Short provenance label recorded in `info.json`: `"fresh"`,
+        `"xtrg.ckpt"`, or `"artifacts/step_XX.ckpt"`.
+
+    Raises
+    ------
+    _CheckpointMissing
+        If `resume_from_step` names a step that was never archived.
+    """
+    if resume_from_step is not None:
+        path = _archived_artifact_path(run_dir, resume_from_step)
+        if not path.exists():
+            raise _CheckpointMissing(
+                f"algorithm.resume_from_step = {resume_from_step} requires "
+                f"{path}, but no such archive exists; check that the earlier "
+                "attempts ran with algorithm.save_artifacts enabled"
+            )
+        return path, f"artifacts/{path.name}"
+
+    live = _find_resume_checkpoint(run_dir)
+    if live is not None:
+        return live, live.name
+
+    step = _latest_archived_step(run_dir, n_steps)
+    if step is not None:
+        path = _archived_artifact_path(run_dir, step)
+        return path, f"artifacts/{path.name}"
+
+    return None, "fresh"
+
+
+def _parse_resume_from_step(cfg_algo: Dict[str, Any], n_steps: int) -> Optional[int]:
+    """Read and validate `[algorithm] resume_from_step`.
+
+    The key is IntraKnot's own: Alice's `Options.from_toml` ignores keys it
+    does not recognize, so it rides along in the same `[algorithm]` section
+    without disturbing the options it builds.
+
+    Parameters
+    ----------
+    cfg_algo:
+        `config["algorithm"]` dict.
+    n_steps:
+        Absolute step index this attempt stops at.
+
+    Returns
+    -------
+    int | None
+        Requested starting step, or `None` when the key is absent.
+
+    Raises
+    ------
+    ValueError
+        If the value is not an integer in `0 … n_steps`.
+    """
+    value = cfg_algo.get("resume_from_step")
+    if value is None:
+        return None
+    # bool is a subclass of int, and `resume_from_step = true` is far more
+    # likely a typo for a step index than a deliberate step 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"algorithm.resume_from_step must be an integer, got {value!r}"
+        )
+    if value < 0:
+        raise ValueError(
+            f"algorithm.resume_from_step must be non-negative, got {value}"
+        )
+    if value > n_steps:
+        raise ValueError(
+            f"algorithm.resume_from_step = {value} is past algorithm.n_steps = "
+            f"{n_steps}; n_steps counts cooling steps from tau_0, so it is the "
+            "absolute step index to stop at, not a number of steps to add"
+        )
+    return value
 
 
 def _update_current(run_dir: Path, attempt_name: str) -> None:
@@ -330,6 +555,129 @@ def _validate_options(opts: xtrg.Options) -> None:
         )
 
 
+def _load_history(run_dir: Path) -> Optional[xtrg.Summary]:
+    """Load `main/thermal.ckpt` if a previous attempt wrote one.
+
+    The file holds the β / log Z history Alice recovers a resumed run from,
+    and is small (a handful of float lists), so reading it up front to
+    validate the starting state costs nothing worth avoiding.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+
+    Returns
+    -------
+    xtrg.Summary | None
+        Recorded thermodynamic history, or `None` when the file is absent.
+    """
+    path = run_dir / "main" / "thermal.ckpt"
+    if not path.exists():
+        return None
+    return xtrg.Summary.load(path)
+
+
+def _validate_resumption(
+    run_dir: Path,
+    history: Optional[xtrg.Summary],
+    state: xtrg.Artifact,
+    opts: xtrg.Options,
+) -> None:
+    """Check the starting state against the recorded history and `n_steps`.
+
+    Repeats the conditions Alice's `xtrg.run` enforces on a resumed run, so
+    that an inconsistency is reported as a checkpoint problem — rather than
+    as a generic bad-parameter failure — and is reported before the
+    Hamiltonian is built. A state at step 0 needs no history: Alice recovers
+    nothing in that case and simply records ρ(τ₀) as the first grid point.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory, named in error messages.
+    history:
+        Recorded history from `main/thermal.ckpt`, or `None` if absent.
+    state:
+        Starting density-matrix snapshot for this attempt.
+    opts:
+        XTRG options this attempt runs with.
+
+    Raises
+    ------
+    _CheckpointMissing
+        If `state.step > 0` but no `thermal.ckpt` exists to recover the
+        β / log Z history for the steps already taken.
+    _CheckpointIncompatible
+        If the state is past `opts.n_steps`, or if the history stops before
+        `state.step`, disagrees with `state.beta` there, or was built with a
+        different τ₀.
+    """
+    main = run_dir / "main"
+    if state.step > opts.n_steps:
+        raise _CheckpointIncompatible(
+            f"starting state is at step {state.step}, past algorithm.n_steps = "
+            f"{opts.n_steps}; n_steps counts cooling steps from tau_0, so it is "
+            "the absolute step index to stop at, not a number of steps to add"
+        )
+    if state.step == 0:
+        return
+
+    if history is None:
+        raise _CheckpointMissing(
+            f"resuming at step {state.step} requires {main / 'thermal.ckpt'} to "
+            "recover the beta / log Z history of the steps already taken, but "
+            "no such file exists"
+        )
+
+    betas = [float(beta) for beta in history.betas]
+    if len(betas) <= state.step:
+        raise _CheckpointIncompatible(
+            f"{main / 'thermal.ckpt'} only reaches step {len(betas) - 1}, but the "
+            f"starting state is at step {state.step}"
+        )
+    if not math.isclose(betas[state.step], state.beta):
+        raise _CheckpointIncompatible(
+            f"{main / 'thermal.ckpt'} records beta = {betas[state.step]:.6g} at step "
+            f"{state.step}, but the starting state has beta = {state.beta:.6g}"
+        )
+    if not math.isclose(betas[0], opts.tau_0):
+        raise _CheckpointIncompatible(
+            f"{main / 'thermal.ckpt'} was built with tau_0 = {betas[0]:.6g}, but "
+            f"algorithm.tau_0 = {opts.tau_0:.6g}; continuing a run requires the "
+            "same tau_0, since it anchors the whole beta grid"
+        )
+
+
+def _backup_history(run_dir: Path) -> None:
+    """Copy `main/thermal.ckpt` to `main/thermal_old.ckpt`.
+
+    Called when this attempt starts below the last step the history records,
+    which means Alice will truncate the later entries and recompute them —
+    overwriting both `thermal.ckpt` and the `step_XX.ckpt` archives past the
+    starting step. The copy keeps the pre-continuation series readable until
+    the new one is confirmed good (see `run`).
+
+    A copy rather than a rename: Alice reads `thermal.ckpt` in place to
+    recover the history prefix, so moving it away would break the very run
+    this backup protects. An existing `thermal_old.ckpt` is left untouched,
+    since it comes from an earlier crashed continuation and is the older —
+    hence more original — of the two.
+
+    Parameters
+    ----------
+    run_dir:
+        Root of the run directory.
+    """
+    source = run_dir / "main" / "thermal.ckpt"
+    backup = run_dir / "main" / "thermal_old.ckpt"
+    if backup.exists():
+        logger.info("Keeping the existing history backup at %s", backup)
+        return
+    shutil.copy2(source, backup)
+    logger.info("Copied the history about to be truncated to %s", backup)
+
+
 def _validate_summary(summary: xtrg.Summary, artifact: xtrg.Artifact) -> None:
     """Ensure Alice's thermodynamic history and final artifact are aligned.
 
@@ -398,6 +746,9 @@ def _write_observables(
     summary: xtrg.Summary,
     artifact: xtrg.Artifact,
     L: int,
+    *,
+    start_step: int,
+    resumed_from: str,
 ) -> None:
     """Write `info.json` to the attempt directory.
 
@@ -411,6 +762,11 @@ def _write_observables(
         Final density-matrix snapshot (bond dimensions).
     L:
         Chain length.
+    start_step:
+        Cooling step this attempt started from; 0 for a fresh ρ(τ₀).
+    resumed_from:
+        Provenance label of the starting state, as returned by
+        `_resolve_start_checkpoint`.
     """
     bond_dims = artifact.rho.bond_dims
     obs: Dict[str, Any] = {
@@ -419,6 +775,10 @@ def _write_observables(
         "system_size": L,
         "finished": summary.finished,
         "n_steps": summary.n_steps,
+        # Provenance of this attempt's starting state: which steps it
+        # actually computed, and which file it picked them up from.
+        "start_step": start_step,
+        "resumed_from": resumed_from,
         # Full free-energy-per-site curve across the cooling schedule (one
         # entry per row of thermodynamics.csv); the other thermodynamic
         # observables are only kept in thermodynamics.csv, not duplicated
@@ -566,21 +926,12 @@ def run(run_dir: Path) -> None:
     end_state = RunState.FAILED
     end_reason: Optional[FailureReason] = FailureReason.SCHEDULER_FAILURE
     # Retrying resumes from main/xtrg.ckpt when one exists (see
-    # _find_resume_checkpoint below), so this is a genuine continuation, not
-    # a restart from tau_0.
+    # _resolve_start_checkpoint below), so this is a genuine continuation,
+    # not a restart from tau_0.
     restartable = True
-
-    # Locate any prior checkpoint for resume support, before the try block
-    # so a lookup failure cannot be mistaken for an Alice error.
-    prior_checkpoint = _find_resume_checkpoint(run_dir)
 
     try:
         _validate_config(cfg_algo)
-
-        # Build Hamiltonian.
-        interactions, spc, geo = build_interaction(cfg_model)
-        mpo = build_hamiltonian(interactions, geo.L, spc)
-        L = geo.L
 
         # Build XTRG options from the `[algorithm]` section. Override
         # checkpoint_dir and artifacts_dir so Alice writes thermal.ckpt,
@@ -589,35 +940,82 @@ def run(run_dir: Path) -> None:
         # directory.
         opts = xtrg.Options.from_toml(cfg_algo)
         _validate_options(opts)
+        resume_from_step = _parse_resume_from_step(cfg_algo, opts.n_steps)
         opts.checkpoint_dir = str(run_dir / "main")
         opts.artifacts_dir = str(run_dir / "main" / "artifacts")
 
-        # Build the starting density-matrix state: resume from main/xtrg.ckpt
-        # left by an interrupted prior attempt, or build rho(tau_0) fresh via
-        # a Taylor expansion.
-        if prior_checkpoint is not None:
-            state = xtrg.Artifact.load(prior_checkpoint)
+        # Resolve where this attempt starts from and check it against the
+        # recorded history before any of the expensive work below, so a
+        # mismatched checkpoint fails in seconds rather than after the
+        # Hamiltonian and rho are in memory.
+        start_path, start_source = _resolve_start_checkpoint(
+            run_dir, opts.n_steps, resume_from_step,
+        )
+        history = _load_history(run_dir)
+        state: Optional[xtrg.Artifact] = None
+        if start_path is not None:
+            state = xtrg.Artifact.load(start_path)
+            _validate_resumption(run_dir, history, state, opts)
+
+        # Build Hamiltonian.
+        interactions, spc, geo = build_interaction(cfg_model)
+        mpo = build_hamiltonian(interactions, geo.L, spc)
+        L = geo.L
+
+        # Build the starting density-matrix state: resume from the checkpoint
+        # resolved above, or build rho(tau_0) fresh via a Taylor expansion.
+        if state is not None:
+            start_step = state.step
             logger.info(
                 "Resuming from %s (step %d / %d, beta=%.6g)",
-                prior_checkpoint, state.step, opts.n_steps, state.beta,
+                start_path, start_step, opts.n_steps, state.beta,
             )
             # Alice's run() recovers the beta/log Z history for step > 0 by
             # reading thermal.ckpt from opts.checkpoint_dir; since that's
             # already the shared main/ directory, no copying is needed.
         else:
+            if history is not None:
+                # A finished history with nothing to square further means the
+                # earlier attempts archived no artifact (save_artifacts off,
+                # or save_artifacts_since past n_steps). The cooling schedule
+                # is about to be redone from tau_0 rather than continued,
+                # which is the opposite of what raising n_steps suggests.
+                logger.warning(
+                    "main/thermal.ckpt exists but no archived artifact at or "
+                    "below step %d is available to continue from; rebuilding "
+                    "rho(tau_0) and recomputing the whole schedule. Enable "
+                    "algorithm.save_artifacts to make future runs continuable.",
+                    opts.n_steps,
+                )
             logger.info(
                 "Building initial state: rho(tau_0=%.6g) via Taylor expansion "
                 "(order %d)", opts.tau_0, opts.taylor_order,
             )
             rho0 = thermal_mpo(mpo, opts.tau_0, opts.taylor_order, spc)
             state = xtrg.Artifact(rho=rho0, beta=opts.tau_0, step=0)
+            start_step = 0
+
+        # Preserve the recorded series when this attempt starts below its
+        # end: Alice truncates the later entries and recomputes them, both
+        # in thermal.ckpt and in the step_XX.ckpt archives.
+        if history is not None and len(history.betas) - 1 > start_step:
+            _backup_history(run_dir)
 
         # --- Run XTRG ---
         summary, artifact = xtrg.run(state, opts)
         _validate_summary(summary, artifact)
 
+        # The replacement history is now on disk and validated, so the backup
+        # of the series it superseded has served its purpose. Removed here
+        # and nowhere else: a failed attempt must leave it behind.
+        (run_dir / "main" / "thermal_old.ckpt").unlink(missing_ok=True)
+
         # Write observables and thermodynamic history.
-        _write_observables(attempt_dir, summary, artifact, L)
+        _write_observables(
+            attempt_dir, summary, artifact, L,
+            start_step=start_step,
+            resumed_from=start_source,
+        )
         _write_thermodynamics(attempt_dir, summary)
 
         # Determine final status. `Summary.finished` is True only for the
@@ -641,6 +1039,19 @@ def run(run_dir: Path) -> None:
         logger.exception("Engine mismatch: wrong runner dispatched")
         end_state = RunState.INVALID
         end_reason = FailureReason.BAD_PARAMETERS
+        restartable = False
+    # Both checkpoint clauses must precede the generic FileNotFoundError /
+    # ValueError clause below, which would otherwise absorb them and report
+    # a checkpoint problem as a bad-parameter one.
+    except _CheckpointMissing:
+        logger.exception("Required XTRG checkpoint missing")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.CHECKPOINT_MISSING
+        restartable = False
+    except _CheckpointIncompatible:
+        logger.exception("XTRG checkpoint inconsistent with recorded history")
+        end_state = RunState.INVALID
+        end_reason = FailureReason.CHECKPOINT_INCOMPATIBLE
         restartable = False
     except _NonFiniteValue:
         logger.exception("Non-finite XTRG observable")

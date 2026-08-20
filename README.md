@@ -222,7 +222,7 @@ failed   execution failed; may be retryable with a new attempt
 invalid  parameters or inputs are wrong; do not retry unchanged
 ```
 
-Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan_detected`, `not_converged` (DMRG), `not_finished` (XTRG), `max_sweeps_reached`, `bad_parameters`, `checkpoint_missing`, `scheduler_failure`.
+Common tensor-network-specific failure reasons: `timeout`, `out_of_memory`, `nan_detected`, `not_converged` (DMRG), `not_finished` (XTRG), `max_sweeps_reached`, `bad_parameters`, `checkpoint_missing`, `checkpoint_incompatible`, `scheduler_failure`.
 
 ### Restart policy
 

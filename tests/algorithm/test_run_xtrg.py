@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import math
 from pathlib import Path
+from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -103,6 +105,124 @@ def _mock_artifact(*, n_steps: int = 2) -> MagicMock:
     return a
 
 
+def _mock_history(*, n_steps: int = 2, tau_0: float = 0.001) -> MagicMock:
+    """Return a MagicMock standing in for a `thermal.ckpt` `xtrg.Summary`.
+
+    Only the fields `_validate_resumption` and the backup decision read are
+    populated: the doubling beta grid, log Z, and one discarded weight per
+    squaring.
+
+    Parameters
+    ----------
+    n_steps:
+        Last step the history reaches; the beta grid has `n_steps + 1` entries.
+    tau_0:
+        First beta of the grid.
+    """
+    h = MagicMock()
+    h.betas = [tau_0 * 2 ** i for i in range(n_steps + 1)]
+    h.log_z = [1.0 - 0.1 * i for i in range(n_steps + 1)]
+    h.discarded_weights = [0.01 / (i + 1) for i in range(n_steps)]
+    return h
+
+
+def _run_mocked(
+    run_dir: Path,
+    *,
+    loaded_artifact=None,
+    history=None,
+    opts=None,
+    summary=None,
+    artifact=None,
+    run_side_effect=None,
+    expect_exit: bool = False,
+) -> Dict[str, Any]:
+    """Call `run_xtrg.run()` with every Alice call mocked.
+
+    Parameters
+    ----------
+    run_dir:
+        Run directory containing a pre-written `config.toml`.
+    loaded_artifact:
+        Value returned by `xtrg.Artifact.load`, consulted only when the
+        runner resolves a checkpoint to start from.
+    history:
+        Value returned by `xtrg.Summary.load`, consulted only when
+        `main/thermal.ckpt` exists. Defaults to a two-step history.
+    opts:
+        Value returned by `xtrg.Options.from_toml`.
+    summary, artifact:
+        Values returned by `xtrg.run`.
+    run_side_effect:
+        Exception raised by `xtrg.run` instead of returning.
+    expect_exit:
+        Whether `run()` is expected to end with `sys.exit(1)`.
+
+    Returns
+    -------
+    dict
+        Mocks for `xtrg`, `thermal_mpo`, `build_interaction`, plus the list
+        of `(path, status)` pairs passed to `write_status`.
+    """
+    from intraknot.algorithm import run_xtrg
+
+    mock_geo = MagicMock()
+    mock_geo.L = 8
+    status_calls: list = []
+
+    with (
+        patch.object(run_xtrg, "alice") as mock_alice,
+        patch.object(run_xtrg, "logging") as mock_logging,
+        patch.object(
+            run_xtrg, "build_interaction",
+            return_value=([], MagicMock(), mock_geo),
+        ) as mock_bi,
+        patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
+        patch.object(
+            run_xtrg, "thermal_mpo", return_value=MagicMock(),
+        ) as mock_thermal_mpo,
+        patch.object(run_xtrg, "xtrg") as mock_xtrg,
+        patch.object(
+            run_xtrg, "write_status",
+            side_effect=lambda p, s: status_calls.append((p, s)),
+        ),
+    ):
+        mock_alice.__version__ = "0.0.0"
+        mock_logging.INFO = 20
+        mock_xtrg.Options.from_toml.return_value = (
+            opts if opts is not None else _mock_opts()
+        )
+        mock_xtrg.Artifact.load.return_value = loaded_artifact
+        mock_xtrg.Summary.load.return_value = (
+            history if history is not None else _mock_history()
+        )
+        if run_side_effect is not None:
+            mock_xtrg.run.side_effect = run_side_effect
+        else:
+            mock_xtrg.run.return_value = (
+                summary if summary is not None else _mock_summary(),
+                artifact if artifact is not None else _mock_artifact(),
+            )
+
+        if expect_exit:
+            with pytest.raises(SystemExit):
+                run_xtrg.run(run_dir)
+        else:
+            run_xtrg.run(run_dir)
+
+    return {
+        "xtrg": mock_xtrg,
+        "thermal_mpo": mock_thermal_mpo,
+        "build_interaction": mock_bi,
+        "status_calls": status_calls,
+    }
+
+
+def _final_main_status(status_calls: list):
+    """Return the last `MainStatus` written outside any attempt directory."""
+    return [s for p, s in status_calls if "attempt" not in str(p)][-1]
+
+
 def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
     """Call `run_xtrg.run()` with all external (Alice) calls mocked.
 
@@ -122,36 +242,12 @@ def _run(run_dir: Path, *, converged: bool = True) -> MagicMock:
     MagicMock
         The mock standing in for `build_interaction`.
     """
-    from intraknot.algorithm import run_xtrg
-
-    mock_geo = MagicMock()
-    mock_geo.L = 8
-
-    with (
-        patch.object(run_xtrg, "alice") as mock_alice,
-        patch.object(run_xtrg, "logging") as mock_logging,
-        patch.object(run_xtrg, "build_interaction") as mock_bi,
-        patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
-        patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()),
-        patch.object(run_xtrg, "xtrg") as mock_xtrg,
-        patch.object(run_xtrg, "write_status"),
-    ):
-        mock_alice.__version__ = "0.0.0"
-        mock_logging.INFO = 20
-        mock_bi.return_value = ([], MagicMock(), mock_geo)
-        mock_xtrg.Options.from_toml.return_value = _mock_opts()
-        mock_xtrg.run.return_value = (
-            _mock_summary(converged=converged),
-            _mock_artifact(),
-        )
-
-        if converged:
-            run_xtrg.run(run_dir)
-        else:
-            with pytest.raises(SystemExit):
-                run_xtrg.run(run_dir)
-
-    return mock_bi
+    mocks = _run_mocked(
+        run_dir,
+        summary=_mock_summary(converged=converged),
+        expect_exit=not converged,
+    )
+    return mocks["build_interaction"]
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +318,265 @@ class TestFindResumeCheckpoint:
         main.mkdir(parents=True)
         (main / "xtrg.ckpt").write_bytes(b"")
         assert _find_resume_checkpoint(tmp_path) == main / "xtrg.ckpt"
+
+
+# ---------------------------------------------------------------------------
+# _archived_artifact_path / _latest_archived_step
+# ---------------------------------------------------------------------------
+
+def _write_archives(run_dir: Path, *steps: int) -> Path:
+    """Create empty `main/artifacts/step_XX.ckpt` files for `steps`."""
+    artifacts = run_dir / "main" / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    for step in steps:
+        (artifacts / f"step_{step:02d}.ckpt").write_bytes(b"")
+    return artifacts
+
+
+class TestArchivedArtifacts:
+    """Tests for `_archived_artifact_path` and `_latest_archived_step`."""
+
+    def test_path_uses_alices_zero_padded_name(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _archived_artifact_path
+        assert _archived_artifact_path(tmp_path, 7) == (
+            tmp_path / "main" / "artifacts" / "step_07.ckpt"
+        )
+
+    def test_returns_none_when_artifacts_dir_absent(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        assert _latest_archived_step(tmp_path, 4) is None
+
+    def test_returns_none_when_no_archives(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        _write_archives(tmp_path)
+        assert _latest_archived_step(tmp_path, 4) is None
+
+    def test_returns_highest_step(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        _write_archives(tmp_path, 0, 1, 2)
+        assert _latest_archived_step(tmp_path, 4) == 2
+
+    def test_skips_steps_past_n_steps(self, tmp_path):
+        """A lowered n_steps must shorten the schedule, not break the run:
+        Alice rejects a starting state past its target."""
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        _write_archives(tmp_path, 0, 1, 2, 3, 4)
+        assert _latest_archived_step(tmp_path, 2) == 2
+
+    def test_returns_none_when_all_steps_past_n_steps(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        _write_archives(tmp_path, 3, 4)
+        assert _latest_archived_step(tmp_path, 2) is None
+
+    def test_ignores_unparsable_names(self, tmp_path):
+        """Alice's transient `step_XX_lock.ckpt` write locks must not be
+        mistaken for archives."""
+        from intraknot.algorithm.run_xtrg import _latest_archived_step
+        artifacts = _write_archives(tmp_path, 1)
+        (artifacts / "step_09_lock.ckpt").write_bytes(b"")
+        (artifacts / "step_backup.ckpt").write_bytes(b"")
+        assert _latest_archived_step(tmp_path, 12) == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_start_checkpoint
+# ---------------------------------------------------------------------------
+
+class TestResolveStartCheckpoint:
+    """Tests for the ordered start-state ladder."""
+
+    def test_fresh_when_nothing_on_disk(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _resolve_start_checkpoint
+        path, source = _resolve_start_checkpoint(tmp_path, 4, None)
+        assert path is None
+        assert source == "fresh"
+
+    def test_live_checkpoint_preferred_over_archives(self, tmp_path):
+        """An interrupted attempt resumes at its own step, which is at or
+        past every archived one."""
+        from intraknot.algorithm.run_xtrg import _resolve_start_checkpoint
+        main = tmp_path / "main"
+        main.mkdir(parents=True)
+        (main / "xtrg.ckpt").write_bytes(b"")
+        _write_archives(tmp_path, 0, 1)
+
+        path, source = _resolve_start_checkpoint(tmp_path, 4, None)
+        assert path == main / "xtrg.ckpt"
+        assert source == "xtrg.ckpt"
+
+    def test_archive_used_when_no_live_checkpoint(self, tmp_path):
+        """A finished run continues from its newest archive."""
+        from intraknot.algorithm.run_xtrg import _resolve_start_checkpoint
+        artifacts = _write_archives(tmp_path, 0, 1, 2)
+
+        path, source = _resolve_start_checkpoint(tmp_path, 5, None)
+        assert path == artifacts / "step_02.ckpt"
+        assert source == "artifacts/step_02.ckpt"
+
+    def test_explicit_step_outranks_live_checkpoint(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _resolve_start_checkpoint
+        main = tmp_path / "main"
+        main.mkdir(parents=True)
+        (main / "xtrg.ckpt").write_bytes(b"")
+        artifacts = _write_archives(tmp_path, 0, 1, 2)
+
+        path, source = _resolve_start_checkpoint(tmp_path, 4, 1)
+        assert path == artifacts / "step_01.ckpt"
+        assert source == "artifacts/step_01.ckpt"
+
+    def test_explicit_missing_archive_raises(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointMissing,
+            _resolve_start_checkpoint,
+        )
+        _write_archives(tmp_path, 0, 1)
+        with pytest.raises(_CheckpointMissing, match="step_03.ckpt"):
+            _resolve_start_checkpoint(tmp_path, 4, 3)
+
+
+# ---------------------------------------------------------------------------
+# _parse_resume_from_step
+# ---------------------------------------------------------------------------
+
+class TestParseResumeFromStep:
+    """Tests for `_parse_resume_from_step`."""
+
+    def test_absent_key_gives_none(self):
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        assert _parse_resume_from_step({"n_steps": 4}, 4) is None
+
+    def test_accepts_step_in_range(self):
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        assert _parse_resume_from_step({"resume_from_step": 0}, 4) == 0
+        assert _parse_resume_from_step({"resume_from_step": 4}, 4) == 4
+
+    def test_rejects_bool(self):
+        """`resume_from_step = true` is a typo, not a request for step 1."""
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        with pytest.raises(ValueError, match="must be an integer"):
+            _parse_resume_from_step({"resume_from_step": True}, 4)
+
+    def test_rejects_non_integer(self):
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        with pytest.raises(ValueError, match="must be an integer"):
+            _parse_resume_from_step({"resume_from_step": "2"}, 4)
+
+    def test_rejects_negative(self):
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        with pytest.raises(ValueError, match="non-negative"):
+            _parse_resume_from_step({"resume_from_step": -1}, 4)
+
+    def test_rejects_step_past_n_steps(self):
+        from intraknot.algorithm.run_xtrg import _parse_resume_from_step
+        with pytest.raises(ValueError, match="absolute step index"):
+            _parse_resume_from_step({"resume_from_step": 5}, 4)
+
+
+# ---------------------------------------------------------------------------
+# _load_history / _validate_resumption
+# ---------------------------------------------------------------------------
+
+class TestValidateResumption:
+    """Tests for `_validate_resumption`."""
+
+    def test_accepts_consistent_history(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _validate_resumption
+        _validate_resumption(
+            tmp_path, _mock_history(n_steps=4),
+            MagicMock(step=2, beta=0.004), _mock_opts(),
+        )
+
+    def test_accepts_history_reaching_past_the_state(self, tmp_path):
+        """Re-cooling a segment is the point: a longer history is truncated
+        by Alice, not rejected."""
+        from intraknot.algorithm.run_xtrg import _validate_resumption
+        _validate_resumption(
+            tmp_path, _mock_history(n_steps=8),
+            MagicMock(step=1, beta=0.002), _mock_opts(),
+        )
+
+    def test_step_zero_needs_no_history(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import _validate_resumption
+        _validate_resumption(
+            tmp_path, None, MagicMock(step=0, beta=0.001), _mock_opts(),
+        )
+
+    def test_state_past_n_steps_raises(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointIncompatible,
+            _validate_resumption,
+        )
+        with pytest.raises(_CheckpointIncompatible, match="absolute step index"):
+            _validate_resumption(
+                tmp_path, _mock_history(n_steps=4),
+                MagicMock(step=3, beta=0.008), _mock_opts(n_steps=2),
+            )
+
+    def test_missing_history_raises(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointMissing,
+            _validate_resumption,
+        )
+        with pytest.raises(_CheckpointMissing, match="thermal.ckpt"):
+            _validate_resumption(
+                tmp_path, None, MagicMock(step=1, beta=0.002), _mock_opts(),
+            )
+
+    def test_history_stopping_before_state_raises(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointIncompatible,
+            _validate_resumption,
+        )
+        with pytest.raises(_CheckpointIncompatible, match="only reaches step 1"):
+            _validate_resumption(
+                tmp_path, _mock_history(n_steps=1),
+                MagicMock(step=2, beta=0.004), _mock_opts(),
+            )
+
+    def test_beta_mismatch_raises(self, tmp_path):
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointIncompatible,
+            _validate_resumption,
+        )
+        with pytest.raises(_CheckpointIncompatible, match="records beta"):
+            _validate_resumption(
+                tmp_path, _mock_history(n_steps=4),
+                MagicMock(step=2, beta=0.5), _mock_opts(),
+            )
+
+    def test_tau_0_mismatch_raises(self, tmp_path):
+        """tau_0 anchors the whole beta grid, so continuing under a different
+        one would silently mislabel every temperature."""
+        from intraknot.algorithm.run_xtrg import (
+            _CheckpointIncompatible,
+            _validate_resumption,
+        )
+        history = _mock_history(n_steps=4, tau_0=0.002)
+        with pytest.raises(_CheckpointIncompatible, match="tau_0"):
+            _validate_resumption(
+                tmp_path, history, MagicMock(step=2, beta=0.008), _mock_opts(),
+            )
+
+
+class TestLoadHistory:
+    """Tests for `_load_history`."""
+
+    def test_returns_none_when_absent(self, tmp_path):
+        from intraknot.algorithm import run_xtrg
+        (tmp_path / "main").mkdir()
+        with patch.object(run_xtrg, "xtrg") as mock_xtrg:
+            assert run_xtrg._load_history(tmp_path) is None
+            mock_xtrg.Summary.load.assert_not_called()
+
+    def test_loads_thermal_ckpt_when_present(self, tmp_path):
+        from intraknot.algorithm import run_xtrg
+        main = tmp_path / "main"
+        main.mkdir()
+        (main / "thermal.ckpt").write_bytes(b"")
+        with patch.object(run_xtrg, "xtrg") as mock_xtrg:
+            history = run_xtrg._load_history(tmp_path)
+        mock_xtrg.Summary.load.assert_called_once_with(main / "thermal.ckpt")
+        assert history is mock_xtrg.Summary.load.return_value
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +711,10 @@ class TestWriteObservables:
         from intraknot.algorithm.run_xtrg import _write_observables
         with patch.object(run_xtrg, "alice") as mock_alice:
             mock_alice.__version__ = "0.0.0"
-            _write_observables(tmp_path, _mock_summary(), _mock_artifact(), L=8)
+            _write_observables(
+                tmp_path, _mock_summary(), _mock_artifact(), L=8,
+                start_step=0, resumed_from="fresh",
+            )
         assert (tmp_path / "info.json").exists()
 
     def test_scalar_fields(self, tmp_path):
@@ -366,13 +724,18 @@ class TestWriteObservables:
         artifact = _mock_artifact()
         with patch.object(run_xtrg, "alice") as mock_alice:
             mock_alice.__version__ = "9.9.9"
-            _write_observables(tmp_path, summary, artifact, L=8)
+            _write_observables(
+                tmp_path, summary, artifact, L=8,
+                start_step=1, resumed_from="artifacts/step_01.ckpt",
+            )
         data = json.loads((tmp_path / "info.json").read_text())
         assert data["algorithm"] == "xtrg"
         assert data["alice_version"] == "9.9.9"
         assert data["system_size"] == 8
         assert data["finished"] is True
         assert data["n_steps"] == 2
+        assert data["start_step"] == 1
+        assert data["resumed_from"] == "artifacts/step_01.ckpt"
         assert data["free_energies_per_site"] == pytest.approx(summary.free_energies)
         assert data["max_bond_dim"] == 4
         assert data["bond_dims"] == [2, 4, 4, 2]
@@ -469,42 +832,11 @@ class TestRunStatus:
 
     def _collect_status_calls(self, run_dir: Path, *, converged: bool):
         """Run with mocked write_status and return all (path, status) calls."""
-        from intraknot.algorithm import run_xtrg
-
-        mock_geo = MagicMock()
-        mock_geo.L = 8
-        calls: list = []
-
-        with (
-            patch.object(run_xtrg, "alice") as mock_alice,
-            patch.object(run_xtrg, "logging") as ml,
-            patch.object(
-                run_xtrg, "build_interaction",
-                return_value=([], MagicMock(), mock_geo),
-            ),
-            patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()),
-            patch.object(run_xtrg, "xtrg") as mock_xtrg,
-            patch.object(
-                run_xtrg, "write_status",
-                side_effect=lambda p, s: calls.append((p, s)),
-            ),
-        ):
-            mock_alice.__version__ = "0.0.0"
-            ml.INFO = 20
-            mock_xtrg.Options.from_toml.return_value = _mock_opts()
-            mock_xtrg.run.return_value = (
-                _mock_summary(converged=converged),
-                _mock_artifact(),
-            )
-
-            if converged:
-                run_xtrg.run(run_dir)
-            else:
-                with pytest.raises(SystemExit):
-                    run_xtrg.run(run_dir)
-
-        return calls
+        return _run_mocked(
+            run_dir,
+            summary=_mock_summary(converged=converged),
+            expect_exit=not converged,
+        )["status_calls"]
 
     def test_converged_sets_completed_on_main_status(self, tmp_path):
         from intraknot.status import RunState
@@ -614,56 +946,13 @@ class TestRunOutputFiles:
 class TestRunResume:
     """run() must resume from `main/xtrg.ckpt` when one exists."""
 
-    def _run_with_mocks(self, run_dir: Path, *, loaded_artifact=None):
-        """Call `run_xtrg.run()` with Alice mocked; return the mocks used.
-
-        Parameters
-        ----------
-        run_dir:
-            Run directory containing a pre-written `config.toml`.
-        loaded_artifact:
-            Value returned by `xtrg.Artifact.load`. Only consulted by the
-            runner when `main/xtrg.ckpt` is found.
-
-        Returns
-        -------
-        dict
-            Mocks for `xtrg`, `thermal_mpo`, keyed by name.
-        """
-        from intraknot.algorithm import run_xtrg
-
-        mock_geo = MagicMock()
-        mock_geo.L = 8
-
-        with (
-            patch.object(run_xtrg, "alice") as mock_alice,
-            patch.object(run_xtrg, "logging") as mock_logging,
-            patch.object(
-                run_xtrg, "build_interaction",
-                return_value=([], MagicMock(), mock_geo),
-            ),
-            patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()) as mock_thermal_mpo,
-            patch.object(run_xtrg, "xtrg") as mock_xtrg,
-            patch.object(run_xtrg, "write_status"),
-        ):
-            mock_alice.__version__ = "0.0.0"
-            mock_logging.INFO = 20
-            mock_xtrg.Options.from_toml.return_value = _mock_opts()
-            mock_xtrg.Artifact.load.return_value = loaded_artifact
-            mock_xtrg.run.return_value = (_mock_summary(), _mock_artifact())
-
-            run_xtrg.run(run_dir)
-
-        return {"xtrg": mock_xtrg, "thermal_mpo": mock_thermal_mpo}
-
     def test_no_prior_checkpoint_builds_fresh_state(self, tmp_path):
         """With no prior attempt, the runner builds rho(tau_0) via thermal_mpo."""
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         _write_config_toml(run_dir)
 
-        mocks = self._run_with_mocks(run_dir)
+        mocks = _run_mocked(run_dir)
 
         mocks["thermal_mpo"].assert_called_once()
         mocks["xtrg"].Artifact.load.assert_not_called()
@@ -683,7 +972,7 @@ class TestRunResume:
         (main / "thermal.ckpt").write_bytes(b"thermal-history")
 
         loaded = MagicMock(step=1, beta=0.002)
-        mocks = self._run_with_mocks(run_dir, loaded_artifact=loaded)
+        mocks = _run_mocked(run_dir, loaded_artifact=loaded)
 
         mocks["thermal_mpo"].assert_not_called()
         mocks["xtrg"].Artifact.load.assert_called_once_with(main / "xtrg.ckpt")
@@ -693,36 +982,297 @@ class TestRunResume:
         assert (main / "thermal.ckpt").read_bytes() == b"thermal-history"
 
     def test_checkpoint_and_artifacts_dir_point_to_main(self, tmp_path):
-        from intraknot.algorithm import run_xtrg
-
         run_dir = tmp_path / "run"
         run_dir.mkdir()
         _write_config_toml(run_dir)
 
-        mock_geo = MagicMock()
-        mock_geo.L = 8
         mock_opts = _mock_opts()
-
-        with (
-            patch.object(run_xtrg, "alice") as mock_alice,
-            patch.object(run_xtrg, "logging") as ml,
-            patch.object(
-                run_xtrg, "build_interaction",
-                return_value=([], MagicMock(), mock_geo),
-            ),
-            patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()),
-            patch.object(run_xtrg, "xtrg") as mock_xtrg,
-            patch.object(run_xtrg, "write_status"),
-        ):
-            mock_alice.__version__ = "0.0.0"
-            ml.INFO = 20
-            mock_xtrg.Options.from_toml.return_value = mock_opts
-            mock_xtrg.run.return_value = (_mock_summary(), _mock_artifact())
-            run_xtrg.run(run_dir)
+        _run_mocked(run_dir, opts=mock_opts)
 
         assert mock_opts.checkpoint_dir == str(run_dir / "main")
         assert mock_opts.artifacts_dir == str(run_dir / "main" / "artifacts")
+
+
+# ---------------------------------------------------------------------------
+# run() — continuation from an archived artifact
+# ---------------------------------------------------------------------------
+
+def _prepare_continuation(
+    run_dir: Path,
+    *,
+    archived=(0, 1, 2),
+    thermal: bytes = b"old-history",
+) -> Path:
+    """Set up `main/` as a run that already finished a shorter schedule.
+
+    Parameters
+    ----------
+    run_dir:
+        Run directory to populate.
+    archived:
+        Step indices to write `main/artifacts/step_XX.ckpt` files for.
+    thermal:
+        Contents of `main/thermal.ckpt`, used to tell the original series
+        from a rewritten one.
+
+    Returns
+    -------
+    Path
+        The `main/` directory.
+    """
+    main = run_dir / "main"
+    main.mkdir(parents=True, exist_ok=True)
+    (main / "thermal.ckpt").write_bytes(thermal)
+    _write_archives(run_dir, *archived)
+    return main
+
+
+class TestRunContinuation:
+    """run() must continue a finished run from its newest archived step."""
+
+    def test_continues_from_highest_archive(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(run_dir)
+
+        loaded = MagicMock(step=2, beta=0.004)
+        mocks = _run_mocked(
+            run_dir, loaded_artifact=loaded, history=_mock_history(n_steps=2),
+        )
+
+        mocks["thermal_mpo"].assert_not_called()
+        mocks["xtrg"].Artifact.load.assert_called_once_with(
+            main / "artifacts" / "step_02.ckpt"
+        )
+        assert mocks["xtrg"].run.call_args[0][0] is loaded
+
+    def test_explicit_resume_from_step_re_cools_a_segment(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir, extra="resume_from_step = 1\n")
+        main = _prepare_continuation(run_dir)
+        (main / "xtrg.ckpt").write_bytes(b"")
+
+        loaded = MagicMock(step=1, beta=0.002)
+        mocks = _run_mocked(
+            run_dir, loaded_artifact=loaded, history=_mock_history(n_steps=2),
+        )
+
+        mocks["xtrg"].Artifact.load.assert_called_once_with(
+            main / "artifacts" / "step_01.ckpt"
+        )
+
+    def test_info_json_records_continuation_provenance(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        _prepare_continuation(run_dir)
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=2),
+        )
+
+        info = json.loads(
+            (run_dir / "main" / "attempts" / "attempt_01" / "info.json").read_text()
+        )
+        assert info["start_step"] == 2
+        assert info["resumed_from"] == "artifacts/step_02.ckpt"
+
+    def test_info_json_records_fresh_provenance(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+
+        _run_mocked(run_dir)
+
+        info = json.loads(
+            (run_dir / "main" / "attempts" / "attempt_01" / "info.json").read_text()
+        )
+        assert info["start_step"] == 0
+        assert info["resumed_from"] == "fresh"
+
+    def test_warns_when_history_has_no_usable_archive(self, tmp_path, caplog):
+        """A finished history with nothing archived means the schedule is
+        recomputed from tau_0, not continued — say so."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        (run_dir / "main").mkdir()
+        (run_dir / "main" / "thermal.ckpt").write_bytes(b"old-history")
+
+        with caplog.at_level(logging.WARNING, logger="intraknot.algorithm.run_xtrg"):
+            mocks = _run_mocked(run_dir, history=_mock_history(n_steps=2))
+
+        mocks["thermal_mpo"].assert_called_once()
+        assert "no archived artifact" in caplog.text
+        assert "save_artifacts" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# run() — checkpoint failure classification
+# ---------------------------------------------------------------------------
+
+class TestRunCheckpointFailures:
+    """Checkpoint problems are reported as such, not as bad parameters."""
+
+    def test_missing_explicit_archive_is_checkpoint_missing(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir, extra="resume_from_step = 2\n")
+        _prepare_continuation(run_dir, archived=(0, 1))
+
+        mocks = _run_mocked(run_dir, expect_exit=True)
+
+        status = _final_main_status(mocks["status_calls"])
+        assert status.state == RunState.INVALID
+        assert status.reason == FailureReason.CHECKPOINT_MISSING
+        assert status.restartable is False
+        # The failure lands before any cooling work is attempted.
+        mocks["xtrg"].run.assert_not_called()
+
+    def test_inconsistent_history_is_checkpoint_incompatible(self, tmp_path):
+        from intraknot.status import FailureReason, RunState
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = run_dir / "main"
+        main.mkdir()
+        (main / "xtrg.ckpt").write_bytes(b"")
+        (main / "thermal.ckpt").write_bytes(b"")
+
+        mocks = _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=1, beta=0.5),
+            history=_mock_history(n_steps=2),
+            expect_exit=True,
+        )
+
+        status = _final_main_status(mocks["status_calls"])
+        assert status.state == RunState.INVALID
+        assert status.reason == FailureReason.CHECKPOINT_INCOMPATIBLE
+        assert status.restartable is False
+        mocks["xtrg"].run.assert_not_called()
+
+    def test_mismatched_tau_0_is_checkpoint_incompatible(self, tmp_path):
+        from intraknot.status import FailureReason
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = run_dir / "main"
+        main.mkdir()
+        (main / "xtrg.ckpt").write_bytes(b"")
+        (main / "thermal.ckpt").write_bytes(b"")
+
+        mocks = _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=1, beta=0.004),
+            history=_mock_history(n_steps=2, tau_0=0.002),
+            expect_exit=True,
+        )
+
+        status = _final_main_status(mocks["status_calls"])
+        assert status.reason == FailureReason.CHECKPOINT_INCOMPATIBLE
+
+
+# ---------------------------------------------------------------------------
+# run() — thermal_old.ckpt lifecycle
+# ---------------------------------------------------------------------------
+
+class TestRunHistoryBackup:
+    """A continuation that truncates the recorded series must keep a copy of
+    it until the replacement is written and validated."""
+
+    def test_backup_kept_when_continuation_fails(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(run_dir, archived=(0, 1, 2, 3, 4))
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=4),
+            run_side_effect=RuntimeError("unphysical trace"),
+            expect_exit=True,
+        )
+
+        assert (main / "thermal_old.ckpt").read_bytes() == b"old-history"
+
+    def test_backup_removed_after_successful_continuation(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(run_dir, archived=(0, 1, 2, 3, 4))
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=4),
+        )
+
+        assert not (main / "thermal_old.ckpt").exists()
+
+    def test_no_backup_when_resuming_at_the_end_of_the_history(self, tmp_path):
+        """An interrupted run picking up where it stopped truncates nothing."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(run_dir, archived=())
+        (main / "xtrg.ckpt").write_bytes(b"")
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=2),
+            run_side_effect=RuntimeError("unphysical trace"),
+            expect_exit=True,
+        )
+
+        assert not (main / "thermal_old.ckpt").exists()
+
+    def test_existing_backup_is_not_overwritten(self, tmp_path):
+        """The backup from an earlier crashed continuation is the older, and
+        therefore more original, of the two series."""
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(
+            run_dir, archived=(0, 1, 2, 3, 4), thermal=b"rewritten-history",
+        )
+        (main / "thermal_old.ckpt").write_bytes(b"original-history")
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=4),
+            run_side_effect=RuntimeError("unphysical trace"),
+            expect_exit=True,
+        )
+
+        assert (main / "thermal_old.ckpt").read_bytes() == b"original-history"
+
+    def test_stale_backup_removed_once_a_run_succeeds(self, tmp_path):
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _write_config_toml(run_dir)
+        main = _prepare_continuation(run_dir, archived=())
+        (main / "xtrg.ckpt").write_bytes(b"")
+        (main / "thermal_old.ckpt").write_bytes(b"original-history")
+
+        _run_mocked(
+            run_dir,
+            loaded_artifact=MagicMock(step=2, beta=0.004),
+            history=_mock_history(n_steps=2),
+        )
+
+        assert not (main / "thermal_old.ckpt").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -733,35 +1283,9 @@ class TestRunExceptionMapping:
     """run() maps Alice/config failures onto IntraKnot status reasons."""
 
     def _run_with_side_effect(self, run_dir: Path, exc: BaseException):
-        from intraknot.algorithm import run_xtrg
-
-        mock_geo = MagicMock()
-        mock_geo.L = 8
-        calls: list = []
-
-        with (
-            patch.object(run_xtrg, "alice") as mock_alice,
-            patch.object(run_xtrg, "logging") as ml,
-            patch.object(
-                run_xtrg, "build_interaction",
-                return_value=([], MagicMock(), mock_geo),
-            ),
-            patch.object(run_xtrg, "build_hamiltonian", return_value=MagicMock()),
-            patch.object(run_xtrg, "thermal_mpo", return_value=MagicMock()),
-            patch.object(run_xtrg, "xtrg") as mock_xtrg,
-            patch.object(
-                run_xtrg, "write_status",
-                side_effect=lambda p, s: calls.append((p, s)),
-            ),
-        ):
-            mock_alice.__version__ = "0.0.0"
-            ml.INFO = 20
-            mock_xtrg.Options.from_toml.return_value = _mock_opts()
-            mock_xtrg.run.side_effect = exc
-            with pytest.raises(SystemExit):
-                run_xtrg.run(run_dir)
-
-        return calls
+        return _run_mocked(run_dir, run_side_effect=exc, expect_exit=True)[
+            "status_calls"
+        ]
 
     def test_value_error_sets_invalid(self, tmp_path):
         from intraknot.status import FailureReason, RunState

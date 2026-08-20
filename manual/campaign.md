@@ -372,7 +372,7 @@ The `restartable` flag is set by the algorithm runner script. It is `true` only 
 | `not_finished` | yes | XTRG-specific (currently unreachable): cooling schedule ended without completing all `n_steps`; resume to continue cooling from the last checkpoint. |
 | `max_sweeps_reached` | no | DMRG-specific: sweep budget exhausted; increase `max_sweeps` in `config.toml`. Does not apply to XTRG. |
 | `bad_parameters` | no | Configuration error; fix `config.toml` and create a new run instead. |
-| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code version. |
+| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code version, or (XTRG) with the current `config.toml` — a `tau_0` or step index disagreeing with `main/thermal.ckpt`; fix `config.toml` and submit again. |
 | `nan_detected` | no | Numerical instability; requires parameter changes. |
 | `linear_algebra_error` | no | Low-level linear algebra failure; requires investigation. |
 
