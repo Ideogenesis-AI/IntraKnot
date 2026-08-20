@@ -123,8 +123,8 @@ Exec jobs:
 | `out_of_memory` | yes | Job was killed by the out-of-memory handler. Resuming continues from the last checkpoint, as for `timeout`. |
 | `nan_detected` | no | Numerical instability during the sweep (DMRG) or cooling step (XTRG). |
 | `bad_parameters` | no | Configuration values rejected by the runner. |
-| `checkpoint_missing` | yes | Expected restart checkpoint was not found. |
-| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code. |
+| `checkpoint_missing` | yes | Expected restart checkpoint was not found. XTRG reports it as `invalid` and not restartable when `resume_from_step` names an unarchived step, since retrying unchanged would fail the same way. |
+| `checkpoint_incompatible` | no | Saved checkpoint is incompatible with the current code, or (XTRG) with the current `config.toml`: `main/thermal.ckpt` disagrees with the state being resumed from, was built with a different `tau_0`, or stops past `n_steps`. |
 | `linear_algebra_error` | no | Low-level linear algebra routine failed. |
 | `scheduler_failure` | yes | Slurm node failure or preemption. Resuming continues from the last checkpoint, as for `timeout`. |
 
