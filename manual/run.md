@@ -177,18 +177,53 @@ init         = "ckpt"
 
 #### XTRG cooling schedule and resumption
 
-XTRG has no `init` key: every fresh attempt builds `ρ(τ₀)` from `[algorithm] tau_0` via a Taylor expansion and cools it for a fixed `n_steps` doubling steps to `β_max = 2^n_steps × τ₀`. Because the schedule length is fixed rather than convergence-driven, resumption is automatic rather than configured — `run_xtrg.py` always checks for it, with no `init = "resume"` equivalent to opt into.
+XTRG has no `init` key: a fresh attempt builds `ρ(τ₀)` from `[algorithm] tau_0` via a Taylor expansion and cools it for a fixed `n_steps` doubling steps to `β_max = 2^n_steps × τ₀`. Because the schedule length is fixed rather than convergence-driven, resumption is automatic rather than configured — `run_xtrg.py` always checks for it, with no `init = "resume"` equivalent to opt into.
 
-`checkpoint_dir` and `artifacts_dir` are both set to `main/`, shared across every attempt of the run. When `iknot run resume` creates a new attempt, the runner checks that one shared location for `main/xtrg.ckpt`. If found, it loads that density-matrix snapshot and its accompanying `main/thermal.ckpt` (β / log Z / discarded-weight history) and continues squaring from the recorded step, instead of rebuilding `ρ(τ₀)` from scratch. If no `xtrg.ckpt` exists (e.g. the first attempt, or a prior attempt completed successfully and its `xtrg.ckpt` was removed), the schedule starts fresh at step 0.
+`checkpoint_dir` and `artifacts_dir` are both set to `main/`, shared across every attempt of the run, so every checkpoint is already where the next attempt looks. Alice treats any archived `main/artifacts/step_XX.ckpt` as a valid restart point, so the runner picks its starting state from the first of these that applies:
+
+| Candidate | Situation |
+|---|---|
+| `artifacts/step_XX.ckpt` named by `resume_from_step` | Re-cooling a segment under changed options |
+| `main/xtrg.ckpt` | A previous attempt was interrupted mid-schedule |
+| Highest `artifacts/step_XX.ckpt` at or below `n_steps` | A previous attempt finished a shorter schedule |
+| Nothing | First attempt: `ρ(τ₀)` is built via Taylor expansion |
+
+The β / log Z / discarded-weight history of the steps already taken is recovered from `main/thermal.ckpt` in all three resuming cases. `info.json` records which candidate was used as `start_step` and `resumed_from`.
 
 ```
 runs/<RUN_ID>/main/
 ├── xtrg.ckpt            # latest rho snapshot; deleted on successful completion
 ├── thermal.ckpt         # beta / log Z / discarded-weight history so far
+├── artifacts/
+│   └── step_XX.ckpt     # one archive per step, each a valid restart point
 └── attempts/
     ├── attempt_01/      # left xtrg.ckpt behind if interrupted mid-schedule
     └── attempt_02/      # resumes from main/xtrg.ckpt automatically
 ```
+
+##### Cooling an already-finished run further
+
+Raise `n_steps` in the run's `config.toml` and submit the run again with `iknot run submit`: the cooling continues from the newest archived step instead of restarting at τ₀. Two constraints apply.
+
+- `n_steps` counts cooling steps from τ₀, so it is the absolute step index to stop at. Going from 12 to 16 adds four doublings, not sixteen. A value *below* the archived steps is not an error — it shortens the schedule, and the run stops where it is asked to.
+- `tau_0` must keep the value the run started with, since it anchors the whole β grid. Changing it ends the attempt as `invalid` with reason `checkpoint_incompatible` rather than producing a series whose temperatures do not match their own `tau_0`.
+
+This only works if the run archived artifacts in the first place (`save_artifacts`, on by default). A run with a `thermal.ckpt` but no archive can only be recomputed from τ₀, and the runner logs a warning saying so rather than doing it silently.
+
+##### Re-cooling a segment at different options
+
+To redo steps a previous attempt already covered — the last few were under-converged and deserve a larger `max_bond`, say — set `resume_from_step` to the step to restart from, alongside the changed options:
+
+```toml
+[algorithm]
+resume_from_step = 12     # restart from artifacts/step_12.ckpt
+n_steps          = 16
+max_bond         = 512    # the reason for redoing steps 13-16
+```
+
+`resume_from_step` outranks `main/xtrg.ckpt`, so it also overrides ordinary interrupted-run resumption; naming a step that was never archived ends the attempt as `invalid` with reason `checkpoint_missing`. Alice recomputes every step past the restart point, overwriting both the later `thermal.ckpt` entries and their `step_XX.ckpt` archives, so one `thermal.ckpt` can end up merging segments computed under different options with no marker at the junction. While the continuation is in flight the runner keeps the superseded series as `main/thermal_old.ckpt`, removing it only once the replacement history is written and validated; copy the run directory beforehand if the original series is worth keeping as data.
+
+Both workflows edit a run's `config.toml` after creation, which is otherwise discouraged: the physics of the run does not change, only how far down in temperature it goes and at what accuracy. Note that `iknot run resume` is a different mechanism, and still applies only to runs that *failed*.
 
 #### Custom physics via `[plugin]`
 
